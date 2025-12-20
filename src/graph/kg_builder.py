@@ -1,5 +1,6 @@
 import json
 import asyncio
+import re
 from typing import List, Dict, Any
 from pathlib import Path
 from datetime import datetime
@@ -23,6 +24,14 @@ class KnowledgeGraphBuilder:
             self.output_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info("Knowledge Graph Builder initialized (optimized with batch processing)")
+    
+    def _clean_text(self, text: str) -> str:
+        if not text:
+            return ""
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'[^\w\s\-.,;:!?()\'\"@#$%&*+=/<>\[\]{}|\\^~`]', '', text)
+        text = text.strip()
+        return text
     
     def _save_intermediate(self, doc_id: str, stage: str, content: Any) -> None:
         if not self.save_intermediates:
@@ -161,9 +170,9 @@ class KnowledgeGraphBuilder:
                                 node[attr_key] = entity_attrs[attr_key]
                         
                         if description:
-                            node["description"] = description
+                            node["description"] = self._clean_text(description)
                         if content_field:
-                            node["content"] = content_field
+                            node["content"] = self._clean_text(content_field)
                         
                         all_nodes.append(node)
                 

@@ -11,14 +11,50 @@ logger = setup_logger(__name__)
 
 class LLMKnowledgeExtractor:
     
-    VALID_PREDICATES = {
-        "TIME_COMPLEXITY", "SPACE_COMPLEXITY", "IMPROVES_OVER",
-        "USES", "BASED_ON", "SIMILAR_TO", "HAS_PROPERTY",
-        "YEAR", "PURPOSE", "DEVELOPED_BY", "APPLIES_TO",
-        "RELATED_TO", "PROS", "CONS"
+    CORE_PREDICATES = {
+        "IS_A", "PART_OF", "HAS", "RELATED_TO", "USES", "CREATED_BY",
+        "BELONGS_TO", "CONTAINS", "REQUIRES", "PRODUCES", "USED_FOR", "COMPARED_TO"
     }
     
-    ENTITY_ATTRIBUTES = ["type", "year", "domain", "inventor", "category"]
+    SECONDARY_PREDICATES = {
+        "INVENTED_BY", "DEVELOPED_BY", "DESIGNED_BY", "IMPLEMENTED_BY",
+        "DEPENDS_ON", "NEEDS", "PREREQUISITE_OF",
+        "SIMILAR_TO", "CONNECTED_TO", "ASSOCIATED_WITH",
+        "SOLVES", "APPLIES_TO", "UTILIZED_IN"
+    }
+    
+    VALID_PREDICATES = CORE_PREDICATES | SECONDARY_PREDICATES
+    
+    ENTITY_IMPORTANCE = {
+        "algorithm": 1.0, "method": 0.95, "technique": 0.9, "system": 0.9,
+        "model": 0.85, "structure": 0.85, "function": 0.8, "process": 0.8,
+        "concept": 0.7, "theory": 0.7, "principle": 0.7,
+        "tool": 0.6, "framework": 0.6, "library": 0.6,
+        "example": 0.3, "instance": 0.3, "case": 0.3
+    }
+    
+    MAX_ENTITIES_PER_CHUNK = 25
+    MAX_RELATIONSHIPS_PER_CHUNK = 30
+    
+    IMPORTANT_ENTITY_TYPES = {
+        "algorithm", "data structure", "complexity", "technique", "method"
+    }
+    
+    SKIP_WORDS = {
+        "the", "a", "an", "is", "are", "was", "were", "be", "been",
+        "have", "has", "had", "do", "does", "did", "will", "would",
+        "could", "should", "may", "might", "must", "shall",
+        "this", "that", "these", "those", "it", "its",
+        "i", "we", "you", "he", "she", "they", "them",
+        "and", "or", "but", "if", "then", "else", "when", "where",
+        "which", "who", "whom", "whose", "what", "how", "why",
+        "all", "each", "every", "both", "few", "more", "most",
+        "other", "some", "such", "no", "nor", "not", "only",
+        "same", "so", "than", "too", "very", "just", "also",
+        "example", "figure", "table", "chapter", "section", "page"
+    }
+    
+    ENTITY_ATTRIBUTES = ["type", "year", "domain", "complexity"]
     
     def __init__(self):
         self.provider = OpenAIProvider()
@@ -56,40 +92,58 @@ class LLMKnowledgeExtractor:
     
     async def _extract_combined(self, text: str) -> Dict[str, Any]:
         try:
-            prompt = f"""Extract entities and relationships from the text about algorithms, data structures, and programming concepts.
+            prompt = f"""Extract ALL important technical concepts and their relationships from this text.
 
-INSTRUCTIONS:
-1. Entities: algorithms, data structures, programming languages, code concepts, control flow statements, functions, methods, etc.
-2. Include code constructs like: if statement, for loop, while loop, class, function definition, etc.
-3. Relationships: [subject, predicate, object] triplets showing connections
-4. Return ONLY valid JSON, no markdown code blocks, no extra text
+ENTITIES TO EXTRACT:
+- Algorithms (Quick Sort, Binary Search, Dijkstra, BFS, DFS, etc.)
+- Data Structures (Array, Tree, Graph, Hash Table, Stack, Queue, Heap, etc.)
+- Complexity notations (O(n), O(log n), O(n²), Θ(n), etc.)
+- Techniques (Divide and Conquer, Dynamic Programming, Greedy, etc.)
+- Concepts (recursion, iteration, traversal, sorting, searching, etc.)
+- Authors/Inventors if mentioned
+- Years/Dates if mentioned
 
-EXAMPLE RELATIONSHIP TYPES:
-TIME_COMPLEXITY, SPACE_COMPLEXITY, IMPROVES_OVER, USES, BASED_ON, SIMILAR_TO, 
-HAS_PROPERTY, YEAR, PURPOSE, DEVELOPED_BY, APPLIES_TO, RELATED_TO, PROS, CONS
+RELATIONSHIPS TO EXTRACT:
+- IS_A: "X is a type of Y", "X is a Y"
+- PART_OF: "X is part of Y", "X belongs to Y"  
+- USES: "X uses Y", "X is based on Y", "X implements Y"
+- HAS: "X has Y", "X contains Y"
+- REQUIRES: "X requires Y", "X needs Y"
+- TIME_COMPLEXITY: "X runs in O(...)", "X has time complexity O(...)"
+- SPACE_COMPLEXITY: "X uses O(...) space"
+- CREATED_BY: "X was created/invented by Y"
+- COMPARED_TO: "X is faster/better than Y", "X vs Y"
+- RELATED_TO: general relationship between concepts
 
 OUTPUT FORMAT:
 {{
-  "entities": ["entity1", "entity2", ...],
+  "entities": ["Quick Sort", "O(n log n)", "Divide and Conquer", "Array", "Partition"],
   "relationships": [
-    {{"subject": "...", "predicate": "...", "object": "..."}},
-    ...
+    {{"subject": "Quick Sort", "predicate": "TIME_COMPLEXITY", "object": "O(n log n)"}},
+    {{"subject": "Quick Sort", "predicate": "USES", "object": "Divide and Conquer"}},
+    {{"subject": "Quick Sort", "predicate": "USES", "object": "Partition"}}
   ]
 }}
 
+RULES:
+1. Extract up to 25 entities
+2. Extract up to 30 relationships
+3. Include BOTH well-known terms AND specific terms from the text
+4. Relationships must connect entities that exist in the text
+
 TEXT:
-{text[:3500]}
+{text[:4000]}
 
-Return only valid JSON:"""
+Return ONLY valid JSON:"""
 
-            response = await self.provider.generate(prompt, temperature=0.1, max_tokens=1500)
+            response = await self.provider.generate(prompt, temperature=0.2, max_tokens=1500)
             
             logger.debug(f"LLM response received: {len(response)} chars")
             
             data = self._parse_json_object(response)
             
             valid_entities = self._validate_entities(data.get("entities", []))
-            valid_rels = self._validate_relationships(data.get("relationships", []))
+            valid_rels = self._validate_relationships(data.get("relationships", []), valid_entities)
             
             return {
                 "entities": valid_entities,
@@ -119,43 +173,40 @@ Return only valid JSON:"""
         try:
             entities = basic_extraction.get("entities", [])
             relationships = basic_extraction.get("relationships", [])
-            entities_str = ", ".join(entities[:20])
             
-            prompt = f"""For these entities about algorithms: {entities_str}
+            if not entities:
+                return basic_extraction
+                
+            entities_str = ", ".join(entities[:10])
+            
+            prompt = f"""For these technical entities: {entities_str}
 
-Extract:
-1. Entity attributes (type, year, domain, inventor)
-2. Context: key phrases, page references, source information
-3. Relationship reasons/details
+Provide brief attributes (ONLY if clearly known):
 
 Return JSON:
 {{
   "entity_attributes": {{
-    "entity_name": {{"type": "Algorithm/DataStructure/...", "year": 1956, "domain": "Graph Theory", "inventor": "...", "category": "..."}},
-    ...
-  }},
-  "relationship_reasons": {{
-    "subject_predicate_object": "reason or details",
-    ...
-  }},
-  "context_information": {{
-    "section": "Introduction",
-    "pages": "pp. 120-125",
-    "source_key_phrases": ["phrase1", "phrase2"]
+    "Quick Sort": {{"type": "Algorithm", "domain": "Sorting", "complexity": "O(n log n)"}},
+    "Binary Search Tree": {{"type": "DataStructure", "domain": "Trees"}}
   }}
 }}
 
-TEXT:
-{text[:2000]}
+RULES:
+- Only include attributes you are certain about
+- Skip unknown attributes (don't guess)
+- Keep it minimal
 
-Return only valid JSON:"""
+TEXT CONTEXT:
+{text[:1500]}
 
-            response = await self.provider.generate(prompt, temperature=0.1, max_tokens=1200)
+Return ONLY valid JSON:"""
+
+            response = await self.provider.generate(prompt, temperature=0.1, max_tokens=800)
             
             enriched_data = self._parse_json_object(response)
             
             enriched_entities = self._enrich_entities(entities, enriched_data.get("entity_attributes", {}))
-            enriched_rels = self._enrich_relationships(relationships, enriched_data.get("relationship_reasons", {}))
+            enriched_rels = relationships
             context_nodes = self._create_context_nodes(enriched_data.get("context_information", {}), entities, text)
             
             return {
@@ -181,13 +232,46 @@ Return only valid JSON:"""
             
             e_clean = e.strip()
             
-            if len(e_clean) > 1 and e_clean.lower() not in seen:
-                valid.append(e_clean)
-                seen.add(e_clean.lower())
+            if len(e_clean) < 2 or e_clean.lower() in seen:
+                continue
+            
+            if len(e_clean) > 100:
+                continue
+            
+            if e_clean.lower() in self.SKIP_WORDS:
+                continue
+            
+            valid.append(e_clean)
+            seen.add(e_clean.lower())
+            
+            if len(valid) >= self.MAX_ENTITIES_PER_CHUNK:
+                break
         
         return valid
     
-    def _validate_relationships(self, relationships: List) -> List[Dict[str, str]]:
+    def _calculate_entity_importance(self, entity: str) -> float:
+        score = 0.5
+        
+        for entity_type, importance in self.ENTITY_IMPORTANCE.items():
+            if entity_type.lower() in entity.lower():
+                score = max(score, importance)
+                break
+        
+        if entity[0].isupper():
+            score += 0.1
+        
+        if len(entity) > 3:
+            score += 0.1
+        
+        words = entity.split()
+        if 1 <= len(words) <= 4:
+            score += 0.1
+        elif len(words) > 6:
+            score -= 0.2
+        
+        return min(score, 1.0)
+    
+    def _validate_relationships(self, relationships: List, valid_entities: List[str] = None) -> List[Dict[str, str]]:
         valid = []
         seen = set()
         
@@ -196,16 +280,49 @@ Return only valid JSON:"""
                 continue
             
             subject = rel.get("subject", "").strip()
-            predicate = rel.get("predicate", "").strip().upper()
+            predicate = rel.get("predicate", "").strip().upper().replace(" ", "_")
             obj = rel.get("object", "").strip()
             
-            if (subject and obj and predicate and len(subject) > 1 and len(obj) > 1 and predicate in self.VALID_PREDICATES):
-                rel_key = (subject.lower(), predicate, obj.lower())
-                if rel_key not in seen:
-                    valid.append({"subject": subject, "predicate": predicate, "object": obj})
-                    seen.add(rel_key)
+            if not (subject and obj and predicate and len(subject) > 1 and len(obj) > 1):
+                continue
+            
+            if len(subject) > 100 or len(obj) > 100:
+                continue
+            
+            if predicate not in self.VALID_PREDICATES:
+                predicate = "RELATED_TO"
+            
+            rel_key = (subject.lower(), predicate, obj.lower())
+            if rel_key not in seen:
+                valid.append({
+                    "subject": subject, 
+                    "predicate": predicate, 
+                    "object": obj
+                })
+                seen.add(rel_key)
+                
+                if len(valid) >= self.MAX_RELATIONSHIPS_PER_CHUNK:
+                    break
         
         return valid
+    
+    def _map_to_core_predicate(self, predicate: str) -> str:
+        mapping = {
+            "INVENTED_BY": "CREATED_BY",
+            "DEVELOPED_BY": "CREATED_BY", 
+            "DESIGNED_BY": "CREATED_BY",
+            "IMPLEMENTED_BY": "CREATED_BY",
+            "DEPENDS_ON": "REQUIRES",
+            "NEEDS": "REQUIRES",
+            "PREREQUISITE_OF": "REQUIRES",
+            "SIMILAR_TO": "RELATED_TO",
+            "CONNECTED_TO": "RELATED_TO",
+            "ASSOCIATED_WITH": "RELATED_TO",
+            "SOLVES": "USED_FOR",
+            "APPLIES_TO": "USED_FOR",
+            "UTILIZED_IN": "USED_FOR",
+        }
+        return mapping.get(predicate, "RELATED_TO")
     
     def _enrich_entities(self, entities: List[str], attributes_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
         enriched = []
@@ -216,9 +333,16 @@ Return only valid JSON:"""
             if entity in attributes_map:
                 attrs = attributes_map[entity]
                 if isinstance(attrs, dict):
-                    for attr_key in ["type", "year", "domain", "inventor", "category"]:
+                    for attr_key in ["type", "year", "domain", "inventor", "category", "complexity", "use_case"]:
                         if attr_key in attrs and attrs[attr_key]:
                             entity_dict[attr_key] = attrs[attr_key]
+            
+            for key, attrs in attributes_map.items():
+                if key.lower() == entity.lower() and isinstance(attrs, dict):
+                    for attr_key in ["type", "year", "domain", "inventor", "category", "complexity", "use_case"]:
+                        if attr_key in attrs and attrs[attr_key] and attr_key not in entity_dict:
+                            entity_dict[attr_key] = attrs[attr_key]
+                    break
             
             enriched.append(entity_dict)
         
@@ -245,27 +369,17 @@ Return only valid JSON:"""
         pages = context_info.get("pages", "")
         source_phrases = context_info.get("source_key_phrases", [])
         
-        if section or pages or source_phrases:
+        if section or pages:
             context_node = {
                 "id": f"context_{hash(section + pages) % 1000000}",
                 "type": "context",
                 "section": section,
                 "pages": pages,
-                "key_phrases": source_phrases[:5],
+                "key_phrases": source_phrases[:3],
                 "entities_count": len(entities),
-                "text_excerpt": original_text[:300]
+                "text_excerpt": original_text[:200]
             }
             context_nodes.append(context_node)
-        
-        for entity in entities[:10]:
-            entity_context = {
-                "id": f"ctx_{hash(entity + section) % 1000000}",
-                "type": "entity_context",
-                "entity": entity,
-                "section": section,
-                "relevance": "high" if entity.lower() in original_text[:500].lower() else "medium"
-            }
-            context_nodes.append(entity_context)
         
         return context_nodes
     

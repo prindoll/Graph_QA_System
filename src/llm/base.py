@@ -1,5 +1,5 @@
 
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from config.settings import settings
 from ..utils.logger import setup_logger
@@ -19,43 +19,223 @@ class LLMManager:
         
         logger.info(f"LLM Manager initialized with provider: {provider_type}")
     
-    async def generate(self, query: str, context: List[str], system_prompt: Optional[str] = None) -> str:
+    async def generate(
+        self, 
+        query: str, 
+        context: List[str], 
+        system_prompt: Optional[str] = None,
+        response_style: str = "detailed"
+    ) -> str:
         if system_prompt is None:
-            system_prompt = self._get_default_system_prompt()
+            system_prompt = self._get_default_system_prompt(response_style)
         
         if isinstance(context, str):
             context_str = context
+            has_relevant_context = bool(context.strip())
         else:
             if not context:
                 logger.warning(f"No context retrieved for query: {query}")
-                return "I don't have information to answer this question based on the knowledge base."
+                return "Sorry, I couldn't find any relevant information for this question in the database."
             
-            context_str = "\n\n".join([f"[Reference {i+1}]\n{ctx}" for i, ctx in enumerate(context)])
+            context_str = self._format_context(context)
+            has_relevant_context = self._check_context_relevance(query, context)
+        
+        if not has_relevant_context:
+            logger.warning(f"Context not relevant to query: {query}")
+            return "Sorry, I couldn't find any relevant information for this question in the database."
+        
+        query_type = self._detect_query_type(query)
+        
+        prompt = self._build_prompt(query, context_str, system_prompt, query_type)
+        
+        temperature = self._get_temperature_for_query(query_type)
+        
+        answer = await self.provider.generate(
+            prompt=prompt,
+            temperature=temperature,
+            max_tokens=settings.llm_max_tokens
+        )
+        
+        return self._post_process_answer(answer, query_type)
+    
+    def _check_context_relevance(self, query: str, context: List[str]) -> bool:
+        query_words = set(query.lower().split())
+        stop_words = {'what', 'is', 'the', 'a', 'an', 'how', 'to', 'do', 'does', 'can', 'could', 
+                      'would', 'should', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 
+                      'has', 'had', 'i', 'you', 'we', 'they', 'it', 'this', 'that', 'for', 
+                      'of', 'in', 'on', 'at', 'by', 'with', 'from', 'and', 'or', 'but', 'if',
+                      'là', 'gì', 'như', 'thế', 'nào', 'sao', 'tại', 'vì', 'để', 'có', 'được',
+                      'và', 'hoặc', 'hay', 'của', 'trong', 'ngoài', 'trên', 'dưới'}
+        
+        query_keywords = query_words - stop_words
+        
+        if not query_keywords:
+            return False
+        
+        context_text = " ".join(context).lower()
+        
+        matched_keywords = sum(1 for word in query_keywords if word in context_text)
+        match_ratio = matched_keywords / len(query_keywords) if query_keywords else 0
+        
+        if match_ratio < 0.3:
+            return False
+        
+        return True
+    
+    def _format_context(self, context: List[str]) -> str:
+        formatted_parts = []
+        
+        for i, ctx in enumerate(context):
+            has_graph = "[Graph Context:" in ctx or "[Relationships:" in ctx
+            
+            if has_graph:
+                parts = ctx.split("[Graph Context:")
+                if len(parts) > 1:
+                    main_content = parts[0].strip()
+                    graph_info = "[Graph Context:" + parts[1]
+                    formatted_parts.append(
+                        f"[Source {i+1}]\n"
+                        f"Content: {main_content}\n"
+                        f"Related Information: {graph_info}"
+                    )
+                else:
+                    parts = ctx.split("[Relationships:")
+                    if len(parts) > 1:
+                        main_content = parts[0].strip()
+                        rel_info = "[Relationships:" + parts[1]
+                        formatted_parts.append(
+                            f"[Source {i+1}]\n"
+                            f"Content: {main_content}\n"
+                            f"Connections: {rel_info}"
+                        )
+                    else:
+                        formatted_parts.append(f"[Source {i+1}]\n{ctx}")
+            else:
+                formatted_parts.append(f"[Source {i+1}]\n{ctx}")
+        
+        return "\n\n".join(formatted_parts)
+    
+    def _detect_query_type(self, query: str) -> str:
+        query_lower = query.lower()
+        
+        if any(word in query_lower for word in ["so sánh", "compare", "khác nhau", "difference", "vs", "versus", "giống", "similar"]):
+            return "comparison"
+        
+        if any(word in query_lower for word in ["tại sao", "why", "vì sao", "nguyên nhân", "reason", "how come"]):
+            return "explanation"
+        
+        if any(word in query_lower for word in ["như thế nào", "how", "cách", "làm sao", "steps", "process", "quy trình"]):
+            return "how_to"
+        
+        if any(word in query_lower for word in ["là gì", "what is", "define", "định nghĩa", "meaning", "nghĩa là"]):
+            return "definition"
+        
+        if any(word in query_lower for word in ["liệt kê", "list", "những", "các loại", "types", "examples", "ví dụ"]):
+            return "listing"
+        
+        if any(word in query_lower for word in ["time complexity", "space complexity", "độ phức tạp", "big o", "O(n)"]):
+            return "complexity"
+        
+        if any(word in query_lower for word in ["ưu điểm", "nhược điểm", "pros", "cons", "advantage", "disadvantage", "trade-off"]):
+            return "pros_cons"
+        
+        return "general"
+    
+    def _get_temperature_for_query(self, query_type: str) -> float:
+        temperature_map = {
+            "definition": 0.3,
+            "complexity": 0.2,
+            "comparison": 0.4,
+            "explanation": 0.5,
+            "how_to": 0.4,
+            "listing": 0.3,
+            "pros_cons": 0.4,
+            "general": 0.5
+        }
+        return temperature_map.get(query_type, 0.5)
+    
+    def _build_prompt(self, query: str, context_str: str, system_prompt: str, query_type: str) -> str:
+        
+        type_instructions = {
+            "comparison": "Compare the items naturally, highlighting key differences and similarities.",
+            
+            "explanation": "Explain the concept clearly with reasoning.",
+            
+            "how_to": "Describe the process step by step.",
+            
+            "definition": "Define and explain the concept.",
+            
+            "listing": "List the items with brief descriptions.",
+            
+            "complexity": "State and explain the complexity analysis.",
+            
+            "pros_cons": "Discuss advantages and disadvantages.",
+            
+            "general": "Answer the question directly and thoroughly."
+        }
+        
+        instruction = type_instructions.get(query_type, type_instructions["general"])
         
         prompt = f"""{system_prompt}
 
-Retrieved Context from Knowledge Base:
+Task: {instruction}
+
+Reference Information:
 {context_str}
 
 Question: {query}
 
-Answer (use ONLY the provided context above):"""
+Answer:"""
         
-        answer = await self.provider.generate(
-            prompt=prompt,
-            temperature=settings.llm_temperature,
-            max_tokens=min(settings.llm_max_tokens, 1024)
-        )
+        return prompt
+    
+    def _post_process_answer(self, answer: str, query_type: str) -> str:
+        answer = answer.strip()
+        
+        if answer.startswith('"') and answer.endswith('"'):
+            answer = answer[1:-1]
+        
+        lines = answer.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            if line.strip() and not line.strip().startswith('---'):
+                cleaned_lines.append(line)
+        
+        answer = '\n'.join(cleaned_lines)
         
         return answer
     
-    @staticmethod
-    def _get_default_system_prompt() -> str:
-        return """You are a technical assistant that answers questions STRICTLY based on the provided context.
+    def _get_default_system_prompt(self, style: str = "detailed") -> str:
+        base_prompt = """You are a technical assistant answering questions from a knowledge base.
 
-IMPORTANT RULES:
-1. ONLY use information from the provided context - do NOT use any outside knowledge
-2. If the answer is not in the context, explicitly say: "This information is not available in the knowledge base"
-3. Quote or reference the context when answering
-4. Be accurate and cite sources from the context
-5. Do not make up or assume information not in the context"""
+RULES:
+1. Use the provided context as your primary information source
+2. Write naturally - do not use phrases like "Additionally," "In general," "Furthermore," "It's worth noting"
+3. Do not mention "context," "sources," "knowledge base," or "Source 1/2/3" in your answer
+4. Integrate all information seamlessly as if it's one unified answer
+5. If context has relevant data, expand on it naturally to give a complete answer
+6. If no relevant context, give a brief general answer without mentioning lack of data
+7. Never say things like "Based on the context" or "According to the sources"
+
+WRITING STYLE:
+- Write as if you naturally know this information
+- Use smooth transitions between ideas
+- Be informative and helpful
+- Sound like an expert explaining to a colleague"""
+
+        if style == "concise":
+            return base_prompt + """
+
+LENGTH: Keep answers brief, 3-5 sentences."""
+        
+        elif style == "detailed":
+            return base_prompt + """
+
+LENGTH: Provide thorough explanations with relevant details."""
+        
+        elif style == "technical":
+            return base_prompt + """
+
+LENGTH: Technical depth with precise terminology."""
+        
+        return base_prompt
