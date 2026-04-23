@@ -861,7 +861,10 @@
                         session_id: sessionId,
                         top_k: 5,
                         use_graph: true,
-                        response_style: 'detailed'
+                        response_style: 'detailed',
+                        retrieval_mode: 'auto',
+                        max_hops: 2,
+                        include_sources: true
                     })
                 });
 
@@ -947,7 +950,8 @@
                 html += '<div class="sources-container">';
                 html += '<div class="sources-title">📚 Sources</div>';
                 sources.forEach((source, i) => {
-                    const truncated = source.length > 150 ? source.substring(0, 150) + '...' : source;
+                    const sourceText = formatSource(source);
+                    const truncated = sourceText.length > 150 ? sourceText.substring(0, 150) + '...' : sourceText;
                     html += `<div class="source-item" onclick="this.classList.toggle('expanded')">${escapeHtml(truncated)}</div>`;
                 });
                 html += '</div>';
@@ -966,6 +970,15 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        function formatSource(source) {
+            if (typeof source === 'string') return source;
+            if (!source || typeof source !== 'object') return String(source || '');
+            const title = source.title || source.id || 'Source';
+            const type = source.type ? ` (${source.type})` : '';
+            const text = source.text || source.summary || source.content || '';
+            return `${title}${type}: ${text}`;
         }
 
         function scrollToBottom() {
@@ -1033,7 +1046,7 @@
                 const data = await response.json();
                 
                 if (data.status === 'success') {
-                    alert(`✅ Upload successful!\nNodes added: ${data.nodes_added}\nEdges added: ${data.edges_added}`);
+                    alert(`✅ Upload successful!\nDocuments: ${data.documents}\nText units: ${data.text_units}\nEntities: ${data.entities}\nRelationships: ${data.relationships}\nCommunities: ${data.communities}\nReports: ${data.community_reports}`);
                     closeUploadModal();
                     loadStats();
                 } else {

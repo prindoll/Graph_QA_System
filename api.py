@@ -16,7 +16,6 @@ from pydantic import BaseModel
 import json
 
 from src.core.graphrag import GraphRAG
-from src.utils.pdf_processor import PDFProcessor
 from src.graph.kg_builder import KnowledgeGraphBuilder
 from src.utils.logger import setup_logger
 
@@ -48,15 +47,19 @@ class ChatRequest(BaseModel):
     top_k: int = 5
     use_graph: bool = True
     response_style: str = "detailed"
+    retrieval_mode: str = "auto"
+    max_hops: int = 2
+    include_sources: bool = True
 
 
 class ChatResponse(BaseModel):
     session_id: str
     message: str
     answer: str
-    sources: List[str]
+    sources: List[Dict[str, Any]]
     timestamp: str
     query_type: Optional[str] = None
+    retrieval_mode: Optional[str] = None
 
 
 class UploadResponse(BaseModel):
@@ -65,6 +68,13 @@ class UploadResponse(BaseModel):
     file_name: Optional[str] = None
     nodes_added: int = 0
     edges_added: int = 0
+    documents: int = 0
+    text_units: int = 0
+    entities: int = 0
+    relationships: int = 0
+    communities: int = 0
+    community_reports: int = 0
+    vector_indexes_created: int = 0
 
 
 def get_rag() -> GraphRAG:
@@ -102,7 +112,10 @@ async def chat(request: ChatRequest):
         result = await rag.query(
             query=request.message,
             top_k=request.top_k,
-            use_graph=request.use_graph
+            use_graph=request.use_graph,
+            retrieval_mode=request.retrieval_mode,
+            max_hops=request.max_hops,
+            include_sources=request.include_sources,
         )
         
         chat_history[session_id].append({
@@ -115,6 +128,7 @@ async def chat(request: ChatRequest):
             "role": "assistant",
             "content": result["answer"],
             "sources": result.get("context", []),
+            "retrieval_mode": result.get("retrieval_mode"),
             "timestamp": datetime.now().isoformat()
         })
         
@@ -126,7 +140,8 @@ async def chat(request: ChatRequest):
             message=request.message,
             answer=result["answer"],
             sources=result.get("context", [])[:3],
-            timestamp=datetime.now().isoformat()
+            timestamp=datetime.now().isoformat(),
+            retrieval_mode=result.get("retrieval_mode")
         )
         
     except Exception as e:
@@ -148,7 +163,10 @@ async def chat_stream(request: ChatRequest):
             context = await rag.retriever_manager.retrieve(
                 query=request.message,
                 top_k=request.top_k,
-                use_graph=request.use_graph
+                use_graph=request.use_graph,
+                retrieval_mode=request.retrieval_mode,
+                max_hops=request.max_hops,
+                include_sources=request.include_sources,
             )
             
             yield f"data: {json.dumps({'type': 'sources', 'sources': context[:3]})}\n\n"
@@ -201,43 +219,33 @@ async def upload_document(
             f.write(content)
         
         rag = get_rag()
-        processor = PDFProcessor()
-        kg_builder = KnowledgeGraphBuilder(save_intermediates=True)
-        
-        if clear_existing:
-            await rag.graph_manager.clear()
-        
-        page_count = processor.get_pdf_page_count(str(file_path))
-        
-        if end_page == -1 or end_page > page_count:
-            end_page = page_count
-        
-        batch_text = processor.extract_pdf_batch(str(file_path), start_page, end_page)
-        
-        if not batch_text:
-            return UploadResponse(
-                status="error",
-                message="No text extracted from PDF",
-                file_name=file.filename
-            )
-        
-        docs = [{
-            "id": f"{file_path.stem}_p{start_page+1}_{end_page}",
-            "content": batch_text,
-            "metadata": {
-                "pages": f"{start_page+1}-{end_page}",
-                "file": file.filename
-            }
-        }]
-        
-        result = await kg_builder.build_and_persist(docs, rag.graph_manager)
+        kg_builder = KnowledgeGraphBuilder(
+            save_intermediates=True,
+            llm_manager=rag.llm_manager,
+            embedding_manager=rag.embedding_manager,
+        )
+        end_page_arg = None if end_page == -1 else end_page
+        result = await kg_builder.index_pdf(
+            str(file_path),
+            rag.graph_manager,
+            start_page=start_page,
+            end_page=end_page_arg,
+            clear=clear_existing,
+        )
         
         return UploadResponse(
-            status="success",
-            message=f"Processed pages {start_page+1}-{end_page}",
+            status=result.get("status", "success"),
+            message=result.get("message") or f"Processed pages starting at {start_page + 1}",
             file_name=file.filename,
             nodes_added=result.get("nodes_added", 0),
-            edges_added=result.get("edges_added", 0)
+            edges_added=result.get("edges_added", 0),
+            documents=result.get("documents", 0),
+            text_units=result.get("text_units", 0),
+            entities=result.get("entities", 0),
+            relationships=result.get("relationships", 0),
+            communities=result.get("communities", 0),
+            community_reports=result.get("community_reports", 0),
+            vector_indexes_created=result.get("vector_indexes_created", 0),
         )
         
     except Exception as e:
@@ -254,6 +262,7 @@ async def get_stats():
             "status": "success",
             "nodes": stats.get("nodes", 0),
             "edges": stats.get("edges", 0),
+            "labels": stats.get("labels", {}),
             "active_sessions": len(chat_history)
         }
     except Exception as e:

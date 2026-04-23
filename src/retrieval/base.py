@@ -1,447 +1,462 @@
-from typing import List, Optional, Dict, Any, Tuple
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-import asyncio
+import json
+import re
+from typing import Any, Dict, List, Optional, Sequence
 
+import numpy as np
+
+from config.settings import settings
 from ..embedding.base import EmbeddingManager
 from ..graph.base import GraphManager
+from ..llm.base import LLMManager
 from ..utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
 
 class RetrieverManager:
+    VALID_MODES = {"auto", "basic", "local", "global", "drift"}
+
     def __init__(
-        self, 
-        embedding_manager: EmbeddingManager, 
-        graph_manager: GraphManager, 
-        top_k: int = 5,
-        max_hops: int = 2,
-        rerank_weight: float = 0.3,
-        batch_size: int = 100
+        self,
+        embedding_manager: EmbeddingManager,
+        graph_manager: GraphManager,
+        llm_manager: Optional[LLMManager] = None,
+        top_k: int = settings.retrieval_top_k,
+        max_hops: int = settings.max_hops,
     ):
         self.embedding_manager = embedding_manager
         self.graph_manager = graph_manager
+        self.llm_manager = llm_manager
         self.top_k = top_k
         self.max_hops = max_hops
-        self.rerank_weight = rerank_weight
-        self.batch_size = batch_size
-        self._embedding_cache = {}
-        logger.info(f"Retriever Manager initialized (max_hops={max_hops}, rerank_weight={rerank_weight})")
-    
-    async def retrieve(self, query: str, top_k: Optional[int] = None, use_graph: bool = True) -> List[str]:
+        logger.info(f"Retriever Manager initialized (mode={settings.retrieval_mode_default}, max_hops={max_hops})")
+
+    async def retrieve(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        use_graph: bool = True,
+        retrieval_mode: Optional[str] = None,
+        max_hops: Optional[int] = None,
+        include_sources: bool = True,
+    ) -> List[Dict[str, Any]]:
         k = top_k or self.top_k
-        
-        try:
-            query_embedding = await self.embedding_manager.embed_text(query)
-            
-            if use_graph:
-                results = await self._graph_retrieve_enhanced(query, query_embedding, max(k * 3, 15))
-            else:
-                results = await self._semantic_retrieve_scalable(query_embedding, max(k * 2, 10))
-            
-            reranked = await self._rerank_results(query, results, k)
-            
-            logger.info(f"Retrieved and reranked {len(reranked)} documents for query")
-            return reranked
-            
-        except Exception as e:
-            logger.error(f"Error retrieving documents: {str(e)}")
-            raise
-    
-    async def _get_total_node_count(self) -> int:
-        try:
-            result = await self.graph_manager.query("MATCH (n) RETURN count(n) as total")
-            if result:
-                return result[0].get("total", 0)
-            return 0
-        except:
-            return 0
-    
-    async def _semantic_retrieve_scalable(self, query_embedding: np.ndarray, top_k: int) -> List[Dict[str, Any]]:
-        try:
-            total_nodes = await self._get_total_node_count()
-            logger.info(f"Total nodes in database: {total_nodes}")
-            
-            all_candidates = []
-            offset = 0
-            
-            while offset < total_nodes:
-                batch_query = f"""
-                MATCH (n) WHERE n.label IS NOT NULL 
-                RETURN n.label as label, n.id as id, n.source_doc as source, 
-                       n.description as description, n.content as content, 
-                       n.type as type, n.domain as domain
-                SKIP {offset} LIMIT {self.batch_size}
-                """
-                
-                nodes = await self.graph_manager.query(batch_query)
-                
-                if not nodes:
-                    break
-                
-                batch_candidates = await self._process_batch_with_content_embedding(nodes, query_embedding)
-                all_candidates.extend(batch_candidates)
-                
-                offset += self.batch_size
-                
-                if len(all_candidates) >= top_k * 10:
-                    break
-            
-            if not all_candidates:
-                logger.warning("No candidates found")
-                return []
-            
-            all_candidates.sort(key=lambda x: x["score"], reverse=True)
-            top_candidates = all_candidates[:top_k]
-            
-            logger.info(f"Semantic retrieval found {len(top_candidates)} candidates from {len(all_candidates)} total")
-            return top_candidates
-            
-        except Exception as e:
-            logger.error(f"Scalable semantic retrieval error: {str(e)}", exc_info=True)
-            return []
-    
-    async def _process_batch_with_content_embedding(
-        self, 
-        nodes: List[Dict], 
-        query_embedding: np.ndarray
-    ) -> List[Dict[str, Any]]:
-        candidates = []
-        
-        texts_to_embed = []
-        node_indices = []
-        
-        for i, node in enumerate(nodes):
-            label = node.get("label") or ""
-            content = node.get("content") or ""
-            description = node.get("description") or ""
-            
-            combined_text = label
-            if content:
-                combined_text += " " + content[:500]
-            elif description:
-                combined_text += " " + description[:300]
-            
-            if combined_text.strip():
-                cache_key = hash(combined_text[:200])
-                if cache_key in self._embedding_cache:
-                    embedding = self._embedding_cache[cache_key]
-                    similarity = cosine_similarity([query_embedding], [embedding])[0][0]
-                    candidates.append({
-                        "id": node.get("id", ""),
-                        "label": label,
-                        "content": content,
-                        "description": description,
-                        "source": node.get("source", ""),
-                        "type": node.get("type", ""),
-                        "domain": node.get("domain", ""),
-                        "score": float(similarity),
-                        "combined_text": combined_text
-                    })
-                else:
-                    texts_to_embed.append(combined_text)
-                    node_indices.append(i)
-        
-        if texts_to_embed:
-            embeddings = await self.embedding_manager.embed_texts(texts_to_embed)
-            similarities = cosine_similarity([query_embedding], embeddings)[0]
-            
-            for j, idx in enumerate(node_indices):
-                node = nodes[idx]
-                label = node.get("label") or ""
-                content = node.get("content") or ""
-                description = node.get("description") or ""
-                
-                cache_key = hash(texts_to_embed[j][:200])
-                self._embedding_cache[cache_key] = embeddings[j]
-                
-                if len(self._embedding_cache) > 10000:
-                    keys_to_remove = list(self._embedding_cache.keys())[:1000]
-                    for k in keys_to_remove:
-                        del self._embedding_cache[k]
-                
-                candidates.append({
-                    "id": node.get("id", ""),
-                    "label": label,
-                    "content": content,
-                    "description": description,
-                    "source": node.get("source", ""),
-                    "type": node.get("type", ""),
-                    "domain": node.get("domain", ""),
-                    "score": float(similarities[j]),
-                    "combined_text": texts_to_embed[j]
-                })
-        
-        return candidates
-    
-    async def _graph_retrieve_enhanced(
-        self, 
-        query: str, 
-        query_embedding: np.ndarray, 
-        top_k: int
-    ) -> List[Dict[str, Any]]:
-        try:
-            initial_candidates = await self._semantic_retrieve_scalable(query_embedding, top_k)
-            
-            if not initial_candidates:
-                return []
-            
-            enhanced_results = []
-            seen_ids = set()
-            
-            for candidate in initial_candidates:
-                node_id = candidate.get("id", "")
-                if node_id in seen_ids:
-                    continue
-                seen_ids.add(node_id)
-                
-                multi_hop_context = await self._multi_hop_traversal(
-                    node_id, 
-                    candidate.get("label", ""),
-                    hops=self.max_hops
-                )
-                
-                candidate["relationships"] = multi_hop_context.get("relationships", [])
-                candidate["related_entities"] = multi_hop_context.get("related_entities", [])
-                candidate["hop_scores"] = multi_hop_context.get("hop_scores", {})
-                
-                graph_boost = self._calculate_graph_boost(multi_hop_context)
-                candidate["final_score"] = candidate["score"] * (1 + graph_boost * 0.2)
-                
-                enhanced_results.append(candidate)
-                
-                for related in multi_hop_context.get("related_entities", [])[:3]:
-                    related_id = related.get("id", "")
-                    if related_id and related_id not in seen_ids:
-                        seen_ids.add(related_id)
-                        related["score"] = candidate["score"] * 0.7
-                        related["final_score"] = related["score"]
-                        related["from_traversal"] = True
-                        enhanced_results.append(related)
-            
-            enhanced_results.sort(key=lambda x: x.get("final_score", x.get("score", 0)), reverse=True)
-            
-            logger.info(f"Graph enhanced retrieval: {len(enhanced_results)} results with multi-hop context")
-            return enhanced_results[:top_k]
-            
-        except Exception as e:
-            logger.error(f"Graph enhanced retrieval error: {str(e)}", exc_info=True)
-            return await self._semantic_retrieve_scalable(query_embedding, top_k)
-    
-    async def _multi_hop_traversal(
-        self, 
-        start_node_id: str, 
-        start_label: str,
-        hops: int = 2
-    ) -> Dict[str, Any]:
-        result = {
-            "relationships": [],
-            "related_entities": [],
-            "hop_scores": {}
-        }
-        
-        try:
-            visited = {start_node_id}
-            current_frontier = [start_node_id]
-            
-            for hop in range(1, hops + 1):
-                if not current_frontier:
-                    break
-                
-                hop_query = """
-                MATCH (n)-[r]-(m) 
-                WHERE n.id IN $node_ids AND m.label IS NOT NULL
-                RETURN DISTINCT 
-                    n.id as source_id,
-                    n.label as source_label,
-                    m.id as target_id, 
-                    m.label as target_label,
-                    m.content as target_content,
-                    m.description as target_description,
-                    m.type as target_type,
-                    type(r) as rel_type,
-                    properties(r) as rel_props
-                LIMIT 50
-                """
-                
-                hop_results = await self.graph_manager.query(hop_query, {"node_ids": current_frontier})
-                
-                next_frontier = []
-                hop_score = 1.0 / (hop + 1)
-                
-                for rel in hop_results:
-                    target_id = rel.get("target_id", "")
-                    
-                    if target_id and target_id not in visited:
-                        visited.add(target_id)
-                        next_frontier.append(target_id)
-                        
-                        rel_info = {
-                            "source": rel.get("source_label", ""),
-                            "target": rel.get("target_label", ""),
-                            "type": rel.get("rel_type", "RELATED_TO"),
-                            "hop": hop,
-                            "properties": rel.get("rel_props", {})
-                        }
-                        result["relationships"].append(rel_info)
-                        
-                        entity_info = {
-                            "id": target_id,
-                            "label": rel.get("target_label", ""),
-                            "content": rel.get("target_content", ""),
-                            "description": rel.get("target_description", ""),
-                            "type": rel.get("target_type", ""),
-                            "hop_distance": hop,
-                            "connected_via": rel.get("rel_type", "")
-                        }
-                        result["related_entities"].append(entity_info)
-                        
-                        result["hop_scores"][target_id] = hop_score
-                
-                current_frontier = next_frontier[:20]
-            
-            logger.debug(f"Multi-hop from '{start_label}': {len(result['relationships'])} rels, {len(result['related_entities'])} entities")
-            
-        except Exception as e:
-            logger.warning(f"Multi-hop traversal error: {str(e)}")
-        
-        return result
-    
-    def _calculate_graph_boost(self, multi_hop_context: Dict[str, Any]) -> float:
-        boost = 0.0
-        
-        num_relationships = len(multi_hop_context.get("relationships", []))
-        boost += min(num_relationships * 0.05, 0.3)
-        
-        hop_scores = multi_hop_context.get("hop_scores", {})
-        if hop_scores:
-            boost += sum(hop_scores.values()) * 0.1
-        
-        rel_types = set(r.get("type", "") for r in multi_hop_context.get("relationships", []))
-        important_rels = {"USES", "BASED_ON", "IMPROVES_OVER", "SIMILAR_TO", "IS_A", "PART_OF"}
-        boost += len(rel_types & important_rels) * 0.1
-        
-        return min(boost, 0.5)
-    
-    async def _rerank_results(
-        self, 
-        query: str, 
-        candidates: List[Dict[str, Any]], 
-        top_k: int
-    ) -> List[str]:
-        if not candidates:
-            return []
-        
-        try:
-            query_lower = query.lower()
-            query_terms = set(query_lower.split())
-            
-            reranked = []
-            
-            for candidate in candidates:
-                base_score = candidate.get("final_score", candidate.get("score", 0))
-                
-                label = (candidate.get("label") or "").lower()
-                content = (candidate.get("content") or "").lower()
-                description = (candidate.get("description") or "").lower()
-                
-                term_match_score = 0
-                for term in query_terms:
-                    if len(term) > 2:
-                        if term in label:
-                            term_match_score += 0.3
-                        if term in content:
-                            term_match_score += 0.1
-                        if term in description:
-                            term_match_score += 0.1
-                
-                coverage_score = 0
-                if content:
-                    coverage_score += 0.1
-                if description:
-                    coverage_score += 0.05
-                if candidate.get("relationships"):
-                    coverage_score += 0.1
-                
-                relationship_score = 0
-                relationships = candidate.get("relationships", [])
-                for rel in relationships[:5]:
-                    rel_target = (rel.get("target") or "").lower()
-                    if any(term in rel_target for term in query_terms if len(term) > 2):
-                        relationship_score += 0.15
-                
-                final_score = (
-                    base_score * (1 - self.rerank_weight) +
-                    (term_match_score + coverage_score + relationship_score) * self.rerank_weight
-                )
-                
-                candidate["rerank_score"] = final_score
-                reranked.append(candidate)
-            
-            reranked.sort(key=lambda x: x["rerank_score"], reverse=True)
-            
-            results = []
-            for candidate in reranked[:top_k]:
-                result_text = self._format_result(candidate)
-                results.append(result_text)
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Reranking error: {str(e)}")
-            return [self._format_result(c) for c in candidates[:top_k]]
-    
-    def _format_result(self, candidate: Dict[str, Any]) -> str:
-        label = candidate.get("label", "")
-        content = candidate.get("content", "")
-        description = candidate.get("description", "")
-        source = candidate.get("source", "")
-        relationships = candidate.get("relationships", [])
-        
-        content = self._clean_text(content)
-        description = self._clean_text(description)
-        
-        if content and len(content.strip()) > 0:
-            content_preview = content[:300] + "..." if len(content) > 300 else content
-            result = f"{label}: {content_preview}"
-        elif description and len(description.strip()) > 0:
-            desc_preview = description[:200] + "..." if len(description) > 200 else description
-            result = f"{label}: {desc_preview}"
+        hops = max_hops or self.max_hops
+        mode = (retrieval_mode or settings.retrieval_mode_default or "auto").lower()
+        if mode not in self.VALID_MODES:
+            mode = "auto"
+        if not use_graph and mode in {"auto", "local", "global", "drift"}:
+            mode = "basic"
+        if mode == "auto":
+            mode = await self.route_query(query, use_graph=use_graph)
+
+        if mode == "basic":
+            contexts = await self._basic_search(query, k)
+        elif mode == "local":
+            contexts = await self._local_search(query, k, hops)
+        elif mode == "global":
+            contexts = await self._global_search(query, k)
+        elif mode == "drift":
+            contexts = await self._drift_search(query, k, hops)
         else:
-            result = label
-        
-        if relationships:
-            rel_texts = []
-            for rel in relationships[:3]:
-                rel_type = rel.get("type", "RELATED_TO")
+            contexts = await self._basic_search(query, k)
+
+        deduped = self._dedupe_contexts(contexts)
+        for item in deduped:
+            item.setdefault("metadata", {})
+            item["metadata"]["retrieval_mode"] = mode
+        logger.info(f"Retrieved {len(deduped)} contexts with mode={mode}")
+        return deduped[: max(k, 1) * 3 if include_sources else k]
+
+    async def route_query(self, query: str, use_graph: bool = True) -> str:
+        if not use_graph:
+            return "basic"
+        if self.llm_manager:
+            prompt = f"""Classify the best GraphRAG retrieval mode for this user query.
+
+Modes:
+- basic: direct factual lookup from text chunks
+- local: entity-specific reasoning using nearby graph entities and text units
+- global: broad dataset/theme/summary questions using community reports
+- drift: mixed or multi-hop questions that need global primer plus local follow-up
+
+Return only JSON: {{"mode": "basic|local|global|drift"}}
+
+Query: {query}"""
+            try:
+                response = await self.llm_manager.generate_prompt(prompt, temperature=0.0, max_tokens=128)
+                data = self._parse_json(response)
+                mode = str(data.get("mode", "")).lower()
+                if mode in {"basic", "local", "global", "drift"}:
+                    return mode
+            except Exception as e:
+                logger.warning(f"LLM query router failed; using heuristic router: {str(e)}")
+        return self._heuristic_route(query)
+
+    def _heuristic_route(self, query: str) -> str:
+        query_lower = query.lower()
+        global_terms = {
+            "overview", "summarize", "summary", "themes", "topics", "dataset", "corpus",
+            "overall", "all documents", "insights", "tổng quan", "tóm tắt", "chủ đề", "toàn bộ",
+        }
+        drift_terms = {
+            "multi-hop", "multihop", "connect", "connection", "relationship", "related",
+            "compare", "why", "cause", "between", "liên quan", "quan hệ", "so sánh", "tại sao",
+        }
+        if any(term in query_lower for term in global_terms):
+            return "global"
+        if any(term in query_lower for term in drift_terms):
+            return "drift"
+        if len(query.split()) <= 5:
+            return "basic"
+        return "local"
+
+    async def _basic_search(self, query: str, top_k: int) -> List[Dict[str, Any]]:
+        embedding = await self.embedding_manager.embed_text(query)
+        return await self._vector_search(
+            index_name="textunit_embedding_vector",
+            label="TextUnit",
+            embedding_property="text_embedding",
+            query_embedding=embedding.tolist(),
+            top_k=max(top_k, 1),
+        )
+
+    async def _local_search(self, query: str, top_k: int, max_hops: int) -> List[Dict[str, Any]]:
+        embedding = await self.embedding_manager.embed_text(query)
+        seed_entities = await self._vector_search(
+            index_name="entity_description_vector",
+            label="Entity",
+            embedding_property="description_embedding",
+            query_embedding=embedding.tolist(),
+            top_k=max(top_k * 2, 6),
+        )
+        if not seed_entities:
+            return await self._basic_search(query, top_k)
+
+        seed_ids = [item["id"] for item in seed_entities if item.get("id")]
+        related_entities = await self._multi_hop_entities(seed_ids, max_hops=max_hops)
+        all_entity_ids = list(dict.fromkeys(seed_ids + [item["id"] for item in related_entities if item.get("id")]))
+
+        text_units = await self._text_units_for_entities(all_entity_ids, limit=max(top_k * 2, 8))
+        reports = await self._reports_for_entities(all_entity_ids, limit=max(top_k, 3))
+
+        relationship_context = self._relationship_summary_context(seed_entities, related_entities)
+        return seed_entities[:top_k] + text_units + reports + relationship_context
+
+    async def _global_search(self, query: str, top_k: int) -> List[Dict[str, Any]]:
+        embedding = await self.embedding_manager.embed_text(query)
+        reports = await self._vector_search(
+            index_name="community_report_vector",
+            label="CommunityReport",
+            embedding_property="content_embedding",
+            query_embedding=embedding.tolist(),
+            top_k=max(top_k * 3, 6),
+        )
+        if not reports:
+            return await self._basic_search(query, top_k)
+
+        points_context = await self._map_reduce_report_points(query, reports[: max(top_k * 2, 4)])
+        return points_context + reports
+
+    async def _drift_search(self, query: str, top_k: int, max_hops: int) -> List[Dict[str, Any]]:
+        primer_reports = await self._global_search(query, max(2, min(top_k, 4)))
+        followups = await self._generate_followups(query, primer_reports)
+        contexts = [
+            {
+                "id": "drift_primer",
+                "type": "drift_primer",
+                "title": "DRIFT primer",
+                "text": self._combine_context_text(primer_reports[:4]),
+                "score": 1.0,
+                "metadata": {"followups": followups},
+            }
+        ]
+        for followup in followups[:3]:
+            contexts.extend(await self._local_search(followup, max(2, top_k // 2), max_hops))
+        return contexts
+
+    async def _vector_search(
+        self,
+        index_name: str,
+        label: str,
+        embedding_property: str,
+        query_embedding: List[float],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        retrieval_query = f"""
+        CALL db.index.vector.queryNodes($index_name, $k, $embedding)
+        YIELD node, score
+        RETURN node.id AS id,
+               labels(node)[0] AS label,
+               coalesce(node.title, node.name, node.source_title, node.id) AS title,
+               coalesce(node.text, node.full_content, node.summary, node.description, "") AS text,
+               score,
+               properties(node) AS metadata
+        """
+        records = await self.graph_manager.query(
+            retrieval_query,
+            {"index_name": index_name, "k": top_k, "embedding": query_embedding},
+        )
+        if records:
+            return [self._record_to_context(record) for record in records]
+        return await self._fallback_vector_scan(label, embedding_property, query_embedding, top_k)
+
+    async def _fallback_vector_scan(
+        self,
+        label: str,
+        embedding_property: str,
+        query_embedding: List[float],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        query = f"""
+        MATCH (node:{label})
+        WHERE node.{embedding_property} IS NOT NULL
+        RETURN node.id AS id,
+               labels(node)[0] AS label,
+               coalesce(node.title, node.name, node.source_title, node.id) AS title,
+               coalesce(node.text, node.full_content, node.summary, node.description, "") AS text,
+               node.{embedding_property} AS embedding,
+               properties(node) AS metadata
+        LIMIT 1000
+        """
+        records = await self.graph_manager.query(query)
+        scored = []
+        for record in records:
+            score = self._cosine(query_embedding, record.get("embedding") or [])
+            record["score"] = score
+            scored.append(record)
+        scored.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+        return [self._record_to_context(record) for record in scored[:top_k]]
+
+    async def _multi_hop_entities(self, entity_ids: Sequence[str], max_hops: int) -> List[Dict[str, Any]]:
+        if not entity_ids:
+            return []
+        hops = max(1, min(int(max_hops), 4))
+        query = f"""
+        MATCH path=(seed:Entity)-[:RELATED_TO*1..{hops}]-(entity:Entity)
+        WHERE seed.id IN $entity_ids AND NOT entity.id IN $entity_ids
+        WITH entity, min(length(path)) AS hop,
+             collect(DISTINCT [
+                rel IN relationships(path) |
+                {
+                    source: startNode(rel).title,
+                    target: endNode(rel).title,
+                    type: coalesce(rel.relationship_type, type(rel)),
+                    description: rel.description,
+                    weight: rel.weight
+                }
+             ]) AS rel_paths
+        RETURN entity.id AS id,
+               "Entity" AS label,
+               entity.title AS title,
+               entity.description AS text,
+               1.0 / (hop + 1) AS score,
+               properties(entity) AS metadata,
+               hop,
+               rel_paths[0] AS relationships
+        ORDER BY score DESC, entity.degree DESC
+        LIMIT 100
+        """
+        records = await self.graph_manager.query(query, {"entity_ids": list(entity_ids)})
+        contexts = []
+        for record in records:
+            context = self._record_to_context(record)
+            context["metadata"]["hop"] = record.get("hop")
+            context["relationships"] = self._neo4j_relationships_to_dicts(record.get("relationships") or [])
+            contexts.append(context)
+        return contexts
+
+    async def _text_units_for_entities(self, entity_ids: Sequence[str], limit: int) -> List[Dict[str, Any]]:
+        if not entity_ids:
+            return []
+        query = """
+        MATCH (tu:TextUnit)-[:MENTIONS]->(entity:Entity)
+        WHERE entity.id IN $entity_ids
+        WITH tu, collect(DISTINCT entity.title) AS matched_entities
+        RETURN tu.id AS id,
+               "TextUnit" AS label,
+               coalesce(tu.source_title, tu.id) AS title,
+               tu.text AS text,
+               toFloat(size(matched_entities)) AS score,
+               properties(tu) AS metadata,
+               matched_entities
+        ORDER BY score DESC, tu.position ASC
+        LIMIT $limit
+        """
+        records = await self.graph_manager.query(query, {"entity_ids": list(entity_ids), "limit": limit})
+        contexts = []
+        for record in records:
+            context = self._record_to_context(record)
+            context["metadata"]["matched_entities"] = record.get("matched_entities", [])
+            contexts.append(context)
+        return contexts
+
+    async def _reports_for_entities(self, entity_ids: Sequence[str], limit: int) -> List[Dict[str, Any]]:
+        if not entity_ids:
+            return []
+        query = """
+        MATCH (entity:Entity)-[:IN_COMMUNITY]->(community:Community)-[:HAS_REPORT]->(report:CommunityReport)
+        WHERE entity.id IN $entity_ids
+        WITH report, collect(DISTINCT entity.title) AS matched_entities
+        RETURN report.id AS id,
+               "CommunityReport" AS label,
+               report.title AS title,
+               coalesce(report.full_content, report.summary, "") AS text,
+               coalesce(report.rank, 1.0) AS score,
+               properties(report) AS metadata,
+               matched_entities
+        ORDER BY score DESC
+        LIMIT $limit
+        """
+        records = await self.graph_manager.query(query, {"entity_ids": list(entity_ids), "limit": limit})
+        contexts = []
+        for record in records:
+            context = self._record_to_context(record)
+            context["metadata"]["matched_entities"] = record.get("matched_entities", [])
+            contexts.append(context)
+        return contexts
+
+    async def _map_reduce_report_points(self, query: str, reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self.llm_manager or not reports:
+            return []
+        report_text = self._combine_context_text(reports)
+        prompt = f"""Use the community reports to extract the most important points for answering the query.
+Return a concise bullet list. Include only grounded points.
+
+Query: {query}
+
+Community reports:
+{report_text}
+"""
+        try:
+            points = await self.llm_manager.generate_prompt(prompt, temperature=0.2, max_tokens=900)
+        except Exception as e:
+            logger.warning(f"Global map step failed: {str(e)}")
+            return []
+        return [
+            {
+                "id": "global_intermediate_points",
+                "type": "global_points",
+                "title": "Aggregated community points",
+                "text": points,
+                "score": 1.0,
+                "metadata": {},
+            }
+        ]
+
+    async def _generate_followups(self, query: str, primer_reports: List[Dict[str, Any]]) -> List[str]:
+        fallback = [query]
+        if not self.llm_manager:
+            return fallback
+        prompt = f"""Create 2-3 focused follow-up search queries for local GraphRAG search.
+Return only JSON: {{"queries": ["..."]}}
+
+Original query: {query}
+
+Primer context:
+{self._combine_context_text(primer_reports[:4])}
+"""
+        try:
+            response = await self.llm_manager.generate_prompt(prompt, temperature=0.2, max_tokens=300)
+            data = self._parse_json(response)
+            queries = [str(item).strip() for item in data.get("queries", []) if str(item).strip()]
+            return [query] + [item for item in queries if item.lower() != query.lower()]
+        except Exception as e:
+            logger.warning(f"DRIFT follow-up generation failed: {str(e)}")
+            return fallback
+
+    def _relationship_summary_context(
+        self,
+        seed_entities: List[Dict[str, Any]],
+        related_entities: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        relationship_lines = []
+        for entity in related_entities[:20]:
+            for rel in entity.get("relationships", [])[:4]:
+                source = rel.get("source", "")
                 target = rel.get("target", "")
-                if target:
-                    rel_texts.append(f"{rel_type} → {target}")
-            
-            if rel_texts:
-                result += f" [Related: {', '.join(rel_texts)}]"
-        
-        if source:
-            result += f" --- {source}"
-        
+                rel_type = rel.get("type", "RELATED_TO")
+                if source or target:
+                    relationship_lines.append(f"{source} -[{rel_type}]-> {target}")
+        if not relationship_lines:
+            return []
+        return [
+            {
+                "id": "local_relationships",
+                "type": "relationships",
+                "title": "Local graph relationships",
+                "text": "\n".join(dict.fromkeys(relationship_lines)),
+                "score": 0.9,
+                "metadata": {"seed_entities": [item.get("title") for item in seed_entities[:8]]},
+            }
+        ]
+
+    def _record_to_context(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = record.get("metadata") or {}
+        metadata.pop("text_embedding", None)
+        metadata.pop("description_embedding", None)
+        metadata.pop("content_embedding", None)
+        return {
+            "id": record.get("id", ""),
+            "type": record.get("label", metadata.get("type", "source")),
+            "title": record.get("title") or record.get("id", ""),
+            "text": record.get("text") or "",
+            "score": float(record.get("score") or 0.0),
+            "metadata": metadata,
+        }
+
+    def _neo4j_relationships_to_dicts(self, relationships: Sequence[Any]) -> List[Dict[str, Any]]:
+        result = []
+        for rel in relationships:
+            try:
+                props = dict(rel)
+                result.append(
+                    {
+                        "source": props.get("source", ""),
+                        "target": props.get("target", ""),
+                        "type": props.get("relationship_type") or props.get("type") or "RELATED_TO",
+                        "description": props.get("description", ""),
+                        "weight": props.get("weight", 1.0),
+                    }
+                )
+            except Exception:
+                continue
         return result
-    
-    def _clean_text(self, text: str) -> str:
-        if not text:
-            return ""
-        
-        import re
-        text = re.sub(r'\s+', ' ', text)
-        text = re.sub(r'[^\w\s\-.,;:!?()\'\"@#$%&*+=/<>[\]{}|\\^~`]', '', text)
-        text = text.strip()
-        
-        return text
-    
-    async def _semantic_retrieve(self, query_embedding: np.ndarray, top_k: int) -> List[str]:
-        candidates = await self._semantic_retrieve_scalable(query_embedding, top_k)
-        return [self._format_result(c) for c in candidates]
-    
-    async def _graph_retrieve(self, query_embedding: np.ndarray, top_k: int) -> List[str]:
-        candidates = await self._graph_retrieve_enhanced("", query_embedding, top_k)
-        return [self._format_result(c) for c in candidates]
+
+    def _dedupe_contexts(self, contexts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen = set()
+        result = []
+        for context in contexts:
+            key = context.get("id") or (context.get("type"), context.get("title"), context.get("text", "")[:80])
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(context)
+        result.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+        return result
+
+    def _combine_context_text(self, contexts: List[Dict[str, Any]]) -> str:
+        parts = []
+        for context in contexts:
+            title = context.get("title", "")
+            text = context.get("text", "")
+            if title or text:
+                parts.append(f"{title}\n{text}")
+        return "\n\n".join(parts)[:8000]
+
+    def _parse_json(self, value: str) -> Dict[str, Any]:
+        start = value.find("{")
+        end = value.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return {}
+        return json.loads(value[start : end + 1])
+
+    def _cosine(self, left: Sequence[float], right: Sequence[float]) -> float:
+        if not left or not right:
+            return 0.0
+        left_array = np.array(left, dtype=float)
+        right_array = np.array(right, dtype=float)
+        denominator = np.linalg.norm(left_array) * np.linalg.norm(right_array)
+        if denominator == 0:
+            return 0.0
+        return float(np.dot(left_array, right_array) / denominator)

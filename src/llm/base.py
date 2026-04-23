@@ -1,6 +1,7 @@
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 
+from langchain_core.prompts import ChatPromptTemplate
 from config.settings import settings
 from ..utils.logger import setup_logger
 
@@ -18,6 +19,33 @@ class LLMManager:
             raise ValueError(f"Unsupported LLM provider: {provider_type}")
         
         logger.info(f"LLM Manager initialized with provider: {provider_type}")
+
+    def get_chat_model(self, temperature: Optional[float] = None):
+        if settings.llm_provider.lower() != "openai":
+            raise ValueError(f"Unsupported LangChain chat provider: {settings.llm_provider}")
+
+        from langchain_openai import ChatOpenAI
+
+        kwargs = {
+            "model": settings.llm_model,
+            "temperature": settings.llm_temperature if temperature is None else temperature,
+            "max_tokens": settings.llm_max_tokens,
+        }
+        if settings.openai_api_key:
+            kwargs["api_key"] = settings.openai_api_key
+        return ChatOpenAI(**kwargs)
+
+    async def generate_prompt(
+        self,
+        prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        return await self.provider.generate(
+            prompt=prompt,
+            temperature=temperature if temperature is not None else settings.llm_temperature,
+            max_tokens=max_tokens or settings.llm_max_tokens,
+        )
     
     async def generate(
         self, 
@@ -58,7 +86,9 @@ class LLMManager:
         
         return self._post_process_answer(answer, query_type)
     
-    def _check_context_relevance(self, query: str, context: List[str]) -> bool:
+    def _check_context_relevance(self, query: str, context: List[Union[str, Dict[str, Any]]]) -> bool:
+        if context:
+            return True
         query_words = set(query.lower().split())
         stop_words = {'what', 'is', 'the', 'a', 'an', 'how', 'to', 'do', 'does', 'can', 'could', 
                       'would', 'should', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 
@@ -72,7 +102,7 @@ class LLMManager:
         if not query_keywords:
             return False
         
-        context_text = " ".join(context).lower()
+        context_text = " ".join(self._context_item_to_text(item) for item in context).lower()
         
         matched_keywords = sum(1 for word in query_keywords if word in context_text)
         match_ratio = matched_keywords / len(query_keywords) if query_keywords else 0
@@ -82,10 +112,33 @@ class LLMManager:
         
         return True
     
-    def _format_context(self, context: List[str]) -> str:
+    def _format_context(self, context: List[Union[str, Dict[str, Any]]]) -> str:
         formatted_parts = []
         
         for i, ctx in enumerate(context):
+            if isinstance(ctx, dict):
+                title = ctx.get("title") or ctx.get("label") or ctx.get("id") or f"Source {i+1}"
+                content = ctx.get("text") or ctx.get("content") or ctx.get("summary") or ""
+                metadata = ctx.get("metadata") or {}
+                relationships = ctx.get("relationships") or []
+                source_type = ctx.get("type") or metadata.get("type") or "source"
+                rel_text = ""
+                if relationships:
+                    rel_parts = []
+                    for rel in relationships[:6]:
+                        if isinstance(rel, dict):
+                            rel_parts.append(
+                                f"{rel.get('source', '')} -[{rel.get('type', 'RELATED_TO')}]-> {rel.get('target', '')}"
+                            )
+                    if rel_parts:
+                        rel_text = "\nRelationships:\n" + "\n".join(rel_parts)
+                formatted_parts.append(
+                    f"[Source {i+1}: {source_type}]\n"
+                    f"Title: {title}\n"
+                    f"Content: {content}{rel_text}"
+                )
+                continue
+
             has_graph = "[Graph Context:" in ctx or "[Relationships:" in ctx
             
             if has_graph:
@@ -114,6 +167,22 @@ class LLMManager:
                 formatted_parts.append(f"[Source {i+1}]\n{ctx}")
         
         return "\n\n".join(formatted_parts)
+
+    def _context_item_to_text(self, item: Union[str, Dict[str, Any]]) -> str:
+        if isinstance(item, str):
+            return item
+        if not isinstance(item, dict):
+            return str(item)
+        parts = [
+            str(item.get("title") or item.get("label") or ""),
+            str(item.get("text") or item.get("content") or item.get("summary") or ""),
+        ]
+        for rel in item.get("relationships") or []:
+            if isinstance(rel, dict):
+                parts.append(str(rel.get("source", "")))
+                parts.append(str(rel.get("target", "")))
+                parts.append(str(rel.get("type", "")))
+        return " ".join(part for part in parts if part)
     
     def _detect_query_type(self, query: str) -> str:
         query_lower = query.lower()
@@ -176,18 +245,14 @@ class LLMManager:
         
         instruction = type_instructions.get(query_type, type_instructions["general"])
         
-        prompt = f"""{system_prompt}
-
-Task: {instruction}
-
-Reference Information:
-{context_str}
-
-Question: {query}
-
-Answer:"""
-        
-        return prompt
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            (
+                "human",
+                "Task: {instruction}\n\nReference Information:\n{context}\n\nQuestion: {query}\n\nAnswer:",
+            ),
+        ])
+        return prompt.format(instruction=instruction, context=context_str, query=query)
     
     def _post_process_answer(self, answer: str, query_type: str) -> str:
         answer = answer.strip()

@@ -86,6 +86,11 @@ class GraphManager:
     async def clear(self) -> bool:
 
         return await self.backend.clear()
+
+    async def ensure_schema(self) -> Dict[str, Any]:
+        if hasattr(self.backend, "ensure_schema"):
+            return await self.backend.ensure_schema()
+        return {"status": "skipped", "message": "Backend does not support schema setup"}
     
     async def batch_add_nodes(self, nodes: List[Dict[str, Any]], batch_size: int = 100) -> Dict[str, Any]:
 
