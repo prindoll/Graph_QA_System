@@ -1,13 +1,13 @@
 # GraphRAG
 
-LangChain + Neo4j GraphRAG service for indexing PDFs into a Microsoft GraphRAG-style knowledge model and answering questions with graph-aware retrieval.
+LangChain + Neo4j GraphRAG service for indexing PDFs or Markdown files into a Microsoft GraphRAG-style knowledge model and answering questions with graph-aware retrieval.
 
 ## Architecture
 
 The current pipeline stores everything in Neo4j:
 
 ```text
-PDF / documents
+PDF / Markdown / documents
   -> Document
   -> TextUnit chunks
   -> Entity + Relationship extraction
@@ -19,9 +19,9 @@ PDF / documents
 
 Main retrieval modes:
 
-- `basic`: vector search over `TextUnit` nodes.
-- `local`: entity vector search, multi-hop graph expansion, mapped text units and community reports.
-- `global`: map-reduce style search over `CommunityReport` nodes.
+- `basic`: hybrid vector + fulltext search over `TextUnit` nodes.
+- `local`: hybrid entity search, multi-hop graph expansion, mapped text units and community reports.
+- `global`: hybrid search over `CommunityReport` nodes with map-reduce style summarization.
 - `drift`: global primer plus local follow-up searches.
 - `auto`: routes each query to the best mode.
 
@@ -29,8 +29,8 @@ Main retrieval modes:
 
 - Python 3.10+
 - Neo4j 5.x
-- OpenAI-compatible chat model credentials for extraction, report generation, routing, and answering
-- Local MiniLM embeddings by default: `sentence-transformers/all-MiniLM-L6-v2`
+- OpenAI-compatible chat model credentials for extraction, report generation, routing, answering, and default embeddings
+- OpenAI embeddings by default: `text-embedding-3-small`
 
 Start Neo4j:
 
@@ -63,9 +63,9 @@ LLM_PROVIDER=openai
 LLM_MODEL=gpt-4o-mini
 OPENAI_API_KEY=your_key_here
 
-EMBEDDING_PROVIDER=local
-EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
-EMBEDDING_DIMENSION=384
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSION=1536
 
 GRAPH_DB_TYPE=neo4j
 NEO4J_URI=bolt://localhost:7687
@@ -79,11 +79,19 @@ COMMUNITY_ALGORITHM=leiden
 DEBUG=False
 ```
 
+When switching from local MiniLM (`384` dimensions) to OpenAI embeddings (`1536` dimensions), reindex with `--clear` so Neo4j vector indexes and stored vectors match.
+
 If `python-igraph` or `leidenalg` is unavailable, indexing falls back to NetworkX Louvain community detection.
 
 ## CLI Usage
 
-Index a PDF and clear old data first:
+Index a Markdown file and clear old data first:
+
+```powershell
+python main.py index data\data.md --clear
+```
+
+Index a PDF:
 
 ```powershell
 python main.py index uploads\document.pdf --clear
@@ -152,7 +160,7 @@ Upload endpoint:
 ```text
 POST /api/upload
 form-data:
-  file=<pdf>
+  file=<pdf|md|markdown>
   start_page=0
   end_page=-1
   clear_existing=true
@@ -174,7 +182,7 @@ Compile check:
 python -m compileall config src api.py main.py tests
 ```
 
-Current tests cover stable IDs, text-unit splitting, graph normalization, routing, and duplicate-safe Neo4j `MERGE` writes. Live Neo4j retrieval quality still requires an indexed corpus.
+Current tests cover stable IDs, Markdown heading metadata, text-unit splitting, graph normalization, routing, OpenAI embedding request shape, hybrid ranking, and duplicate-safe batched Neo4j `MERGE` writes. Live Neo4j retrieval quality still requires an indexed corpus.
 
 ## Quality Evaluation
 
@@ -196,13 +204,13 @@ Before evaluating, ensure Neo4j is running and data has been reindexed with the 
 
 ```powershell
 docker compose up -d neo4j
-python main.py index uploads\document.pdf --clear
+python main.py index data\data.md --clear
 python main.py stats
 ```
 
 ## Notes
 
 - The new schema is not migrated from the previous graph format. Use `--clear` and reindex.
-- All graph writes use `MERGE` to reduce duplicate nodes and relationships.
-- Neo4j vector indexes are created for `TextUnit.text_embedding`, `Entity.description_embedding`, and `CommunityReport.content_embedding`.
-- The default embedding model is local and cheap to run, but higher-quality embedding providers may improve semantic retrieval.
+- All graph writes use batched `UNWIND` + `MERGE` to reduce duplicate nodes and relationships.
+- Neo4j vector indexes are created for `TextUnit.text_embedding`, `Entity.description_embedding`, and `CommunityReport.content_embedding`; fulltext indexes are created for hybrid retrieval.
+- The default embedding model is OpenAI `text-embedding-3-small`; set `EMBEDDING_PROVIDER=local`, `EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2`, and `EMBEDDING_DIMENSION=384` to use local MiniLM instead.

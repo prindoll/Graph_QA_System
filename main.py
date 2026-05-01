@@ -43,6 +43,36 @@ async def index_pdf(
     return result
 
 
+async def index_path(
+    file_path: str,
+    start_page: int = 0,
+    end_page: Optional[int] = None,
+    clear: bool = False,
+) -> dict:
+    path = Path(file_path)
+    if not path.exists():
+        return {"status": "error", "message": f"File not found: {file_path}"}
+
+    rag = GraphRAG()
+    builder = KnowledgeGraphBuilder(
+        save_intermediates=True,
+        output_dir="data/processing",
+        llm_manager=rag.llm_manager,
+        embedding_manager=rag.embedding_manager,
+    )
+    result = await builder.index_path(
+        str(path),
+        rag.graph_manager,
+        start_page=start_page,
+        end_page=end_page,
+        clear=clear,
+    )
+    stats = await rag.graph_manager.get_stats()
+    result["total_nodes"] = stats.get("nodes", 0)
+    result["total_edges"] = stats.get("edges", 0)
+    return result
+
+
 async def query_graph(text: str, top_k: int = 5, mode: str = "auto", max_hops: int = 2) -> dict:
     rag = GraphRAG()
     result = await rag.query(
@@ -77,8 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GraphRAG CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    index_parser = subparsers.add_parser("index", aliases=["extract"], help="Index a PDF into Neo4j GraphRAG schema")
-    index_parser.add_argument("pdf")
+    index_parser = subparsers.add_parser("index", aliases=["extract"], help="Index a PDF or Markdown file into Neo4j GraphRAG schema")
+    index_parser.add_argument("path")
     index_parser.add_argument("--start-page", type=int, default=0)
     index_parser.add_argument("--end-page", type=int, default=None)
     index_parser.add_argument("--batch", type=int, default=None, help="Accepted for compatibility; indexing uses text-unit chunking.")
@@ -141,7 +171,7 @@ async def main() -> None:
     args = build_parser().parse_args()
 
     if args.command in {"index", "extract"}:
-        result = await index_pdf(args.pdf, start_page=args.start_page, end_page=args.end_page, clear=args.clear)
+        result = await index_path(args.path, start_page=args.start_page, end_page=args.end_page, clear=args.clear)
         print_index_result(result)
     elif args.command == "extract-pages":
         result = await index_pdf(args.pdf, start_page=args.start_page, end_page=args.end_page, clear=args.clear)

@@ -16,11 +16,17 @@ class Settings(BaseSettings):
     openai_api_key: Optional[str] = None
     llm_temperature: float = 0.7
     llm_max_tokens: int = 2048
+    llm_request_timeout_seconds: int = 120
+    llm_extraction_max_tokens: int = 900
+    llm_community_report_max_tokens: int = 900
+    llm_extraction_text_chars: int = 3500
+    max_llm_community_reports: int = 25
+    min_llm_community_size: int = 3
     
     # Embedding Configuration
-    embedding_provider: str = "local"
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    embedding_dimension: int = 384
+    embedding_provider: str = "openai"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimension: int = 1536
     
     # Graph Database Configuration
     graph_db_type: str = "neo4j"
@@ -39,6 +45,13 @@ class Settings(BaseSettings):
     max_hops: int = 2
     chunk_size: int = 1200
     chunk_overlap: int = 100
+    index_max_concurrent: int = 6
+    index_progress_heartbeat_seconds: int = 15
+    index_slow_chunk_seconds: int = 20
+    hybrid_candidate_multiplier: int = 4
+    hybrid_vector_weight: float = 0.65
+    hybrid_keyword_weight: float = 0.25
+    hybrid_graph_weight: float = 0.10
     community_algorithm: str = "leiden"
     
     # General Settings

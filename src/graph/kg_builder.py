@@ -15,7 +15,7 @@ class KnowledgeGraphBuilder:
         self,
         save_intermediates: bool = True,
         output_dir: str = "data/processing",
-        max_concurrent: int = 3,
+        max_concurrent: Optional[int] = None,
         llm_manager: Optional[LLMManager] = None,
         embedding_manager: Optional[EmbeddingManager] = None,
     ):
@@ -50,6 +50,22 @@ class KnowledgeGraphBuilder:
     ) -> Dict[str, Any]:
         return await self.indexer.index_pdf(
             pdf_path=pdf_path,
+            graph_manager=graph_manager,
+            start_page=start_page,
+            end_page=end_page,
+            clear=clear,
+        )
+
+    async def index_path(
+        self,
+        file_path: str,
+        graph_manager,
+        start_page: int = 0,
+        end_page: Optional[int] = None,
+        clear: bool = False,
+    ) -> Dict[str, Any]:
+        return await self.indexer.index_path(
+            file_path=file_path,
             graph_manager=graph_manager,
             start_page=start_page,
             end_page=end_page,

@@ -207,8 +207,9 @@ async def upload_document(
     clear_existing: bool = Form(False)
 ):
     try:
-        if not file.filename.endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in {".pdf", ".md", ".markdown"}:
+            raise HTTPException(status_code=400, detail="Only PDF and Markdown files are supported")
         
         upload_dir = Path("uploads")
         upload_dir.mkdir(exist_ok=True)
@@ -224,8 +225,8 @@ async def upload_document(
             llm_manager=rag.llm_manager,
             embedding_manager=rag.embedding_manager,
         )
-        end_page_arg = None if end_page == -1 else end_page
-        result = await kg_builder.index_pdf(
+        end_page_arg = None if suffix != ".pdf" or end_page == -1 else end_page
+        result = await kg_builder.index_path(
             str(file_path),
             rag.graph_manager,
             start_page=start_page,
@@ -235,7 +236,9 @@ async def upload_document(
         
         return UploadResponse(
             status=result.get("status", "success"),
-            message=result.get("message") or f"Processed pages starting at {start_page + 1}",
+            message=result.get("message") or (
+                f"Processed pages starting at {start_page + 1}" if suffix == ".pdf" else "Processed Markdown document"
+            ),
             file_name=file.filename,
             nodes_added=result.get("nodes_added", 0),
             edges_added=result.get("edges_added", 0),

@@ -1,5 +1,6 @@
 import json
 import re
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from neo4j import AsyncGraphDatabase
@@ -16,6 +17,20 @@ class Neo4jManager(BaseGraphManager):
         "textunit_embedding_vector": ("TextUnit", "text_embedding"),
         "entity_description_vector": ("Entity", "description_embedding"),
         "community_report_vector": ("CommunityReport", "content_embedding"),
+    }
+    FULLTEXT_INDEXES = {
+        "textunit_fulltext": (
+            "TextUnit",
+            ["text", "source_title", "section_title", "heading_path"],
+        ),
+        "entity_fulltext": (
+            "Entity",
+            ["title", "name", "description", "type"],
+        ),
+        "community_report_fulltext": (
+            "CommunityReport",
+            ["title", "summary", "full_content", "rating_explanation"],
+        ),
     }
 
     def __init__(
@@ -68,11 +83,15 @@ class Neo4jManager(BaseGraphManager):
         ]
 
         vector_indexes_created = 0
+        vector_indexes_recreated = 0
+        fulltext_indexes_created = 0
         async with self._session() as session:
             for statement in constraints:
                 await session.run(statement)
 
             for index_name, (label, property_name) in self.VECTOR_INDEXES.items():
+                if await self._drop_vector_index_if_dimension_changed(session, index_name):
+                    vector_indexes_recreated += 1
                 statement = f"""
                 CREATE VECTOR INDEX {index_name} IF NOT EXISTS
                 FOR (n:{label}) ON (n.{property_name})
@@ -87,11 +106,60 @@ class Neo4jManager(BaseGraphManager):
                 except Exception as e:
                     logger.warning(f"Could not create vector index {index_name}: {str(e)}")
 
+            for index_name, (label, properties) in self.FULLTEXT_INDEXES.items():
+                property_list = ", ".join(f"n.{property_name}" for property_name in properties)
+                statement = f"""
+                CREATE FULLTEXT INDEX {index_name} IF NOT EXISTS
+                FOR (n:{label}) ON EACH [{property_list}]
+                """
+                try:
+                    await session.run(statement)
+                    fulltext_indexes_created += 1
+                except Exception as e:
+                    logger.warning(f"Could not create fulltext index {index_name}: {str(e)}")
+
         return {
             "status": "success",
             "constraints": len(constraints),
             "vector_indexes_created": vector_indexes_created,
+            "vector_indexes_recreated": vector_indexes_recreated,
+            "fulltext_indexes_created": fulltext_indexes_created,
         }
+
+    async def _drop_vector_index_if_dimension_changed(self, session, index_name: str) -> bool:
+        try:
+            result = await session.run(
+                """
+                SHOW INDEXES
+                YIELD name, type, options
+                WHERE name = $name
+                RETURN type, options
+                """,
+                name=index_name,
+            )
+            record = await result.single()
+            if not record:
+                return False
+
+            options = record.get("options") or {}
+            if isinstance(options, str):
+                options = json.loads(options)
+            index_config = options.get("indexConfig") or {}
+            current_dimension = index_config.get("vector.dimensions")
+            if current_dimension is None:
+                return False
+            if int(current_dimension) == int(settings.embedding_dimension):
+                return False
+
+            await session.run(f"DROP INDEX {index_name} IF EXISTS")
+            logger.info(
+                f"Dropped vector index {index_name} because dimension changed "
+                f"from {current_dimension} to {settings.embedding_dimension}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Could not inspect vector index {index_name}: {str(e)}")
+            return False
 
     async def add_nodes(self, nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not self.driver:
@@ -99,6 +167,7 @@ class Neo4jManager(BaseGraphManager):
 
         added_count = 0
         async with self._session() as session:
+            grouped_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for node in nodes:
                 node_id = node.get("id")
                 if not node_id:
@@ -107,16 +176,22 @@ class Neo4jManager(BaseGraphManager):
                 node_type = self._sanitize_label(node.get("type") or node.get("label_type") or "Entity")
                 properties = self._sanitize_properties({k: v for k, v in node.items() if k not in {"id", "type"}})
                 properties["id"] = node_id
+                grouped_rows[node_type].append({"id": node_id, "props": properties})
 
+            for node_type, rows in grouped_rows.items():
                 query = f"""
-                MERGE (n:{node_type} {{id: $id}})
-                SET n += $props
+                UNWIND $rows AS row
+                MERGE (n:{node_type} {{id: row.id}})
+                SET n += row.props
+                RETURN count(n) AS count
                 """
-                try:
-                    await session.run(query, id=node_id, props=properties)
-                    added_count += 1
-                except Exception as node_error:
-                    logger.warning(f"Error adding node {node_id}: {str(node_error)}")
+                for batch in self._batches(rows):
+                    try:
+                        result = await session.run(query, rows=batch)
+                        record = await result.single()
+                        added_count += int(record["count"]) if record else 0
+                    except Exception as node_error:
+                        logger.warning(f"Error adding {node_type} node batch: {str(node_error)}")
 
         logger.info(f"Merged {added_count}/{len(nodes)} nodes into Neo4j")
         return {"status": "success", "count": added_count}
@@ -127,6 +202,7 @@ class Neo4jManager(BaseGraphManager):
 
         added_count = 0
         async with self._session() as session:
+            grouped_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for edge in edges:
                 source = edge.get("source")
                 target = edge.get("target")
@@ -137,23 +213,30 @@ class Neo4jManager(BaseGraphManager):
                 edge_id = edge.get("id") or f"{relation}:{source}:{target}"
                 properties = self._sanitize_properties({k: v for k, v in edge.items() if k not in {"source", "target", "type"}})
                 properties["id"] = edge_id
+                grouped_rows[relation].append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "id": edge_id,
+                        "props": properties,
+                    }
+                )
 
+            for relation, rows in grouped_rows.items():
                 query = f"""
-                MATCH (a {{id: $source}}), (b {{id: $target}})
-                MERGE (a)-[r:{relation} {{id: $id}}]->(b)
-                SET r += $props
+                UNWIND $rows AS row
+                MATCH (a {{id: row.source}}), (b {{id: row.target}})
+                MERGE (a)-[r:{relation} {{id: row.id}}]->(b)
+                SET r += row.props
+                RETURN count(r) AS count
                 """
-                try:
-                    await session.run(
-                        query,
-                        source=source,
-                        target=target,
-                        id=edge_id,
-                        props=properties,
-                    )
-                    added_count += 1
-                except Exception as edge_error:
-                    logger.warning(f"Could not merge edge {source}-{relation}-{target}: {str(edge_error)}")
+                for batch in self._batches(rows):
+                    try:
+                        result = await session.run(query, rows=batch)
+                        record = await result.single()
+                        added_count += int(record["count"]) if record else 0
+                    except Exception as edge_error:
+                        logger.warning(f"Could not merge {relation} edge batch: {str(edge_error)}")
 
         logger.info(f"Merged {added_count}/{len(edges)} edges into Neo4j")
         return {"status": "success", "count": added_count}
@@ -231,6 +314,10 @@ class Neo4jManager(BaseGraphManager):
                 continue
             sanitized[clean_key] = self._to_neo4j_value(value)
         return sanitized
+
+    def _batches(self, rows: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+        batch_size = max(1, int(settings.batch_size or 100))
+        return [rows[index : index + batch_size] for index in range(0, len(rows), batch_size)]
 
     def _to_neo4j_value(self, value: Any) -> Any:
         if value is None:

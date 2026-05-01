@@ -84,7 +84,7 @@ Return only JSON: {{"mode": "basic|local|global|drift"}}
 
 Query: {query}"""
             try:
-                response = await self.llm_manager.generate_prompt(prompt, temperature=0.0, max_tokens=128)
+                response = await self.llm_manager.generate_prompt(prompt, temperature=0.0, max_tokens=128, json_mode=True)
                 data = self._parse_json(response)
                 mode = str(data.get("mode", "")).lower()
                 if mode in {"basic", "local", "global", "drift"}:
@@ -113,21 +113,25 @@ Query: {query}"""
 
     async def _basic_search(self, query: str, top_k: int) -> List[Dict[str, Any]]:
         embedding = await self.embedding_manager.embed_text(query)
-        return await self._vector_search(
+        return await self._hybrid_search(
+            query=query,
             index_name="textunit_embedding_vector",
+            fulltext_index_name="textunit_fulltext",
             label="TextUnit",
             embedding_property="text_embedding",
-            query_embedding=embedding.tolist(),
-            top_k=max(top_k, 1),
+            query_embedding=self._embedding_to_list(embedding),
+            top_k=max(top_k * 3, 3),
         )
 
     async def _local_search(self, query: str, top_k: int, max_hops: int) -> List[Dict[str, Any]]:
         embedding = await self.embedding_manager.embed_text(query)
-        seed_entities = await self._vector_search(
+        seed_entities = await self._hybrid_search(
+            query=query,
             index_name="entity_description_vector",
+            fulltext_index_name="entity_fulltext",
             label="Entity",
             embedding_property="description_embedding",
-            query_embedding=embedding.tolist(),
+            query_embedding=self._embedding_to_list(embedding),
             top_k=max(top_k * 2, 6),
         )
         if not seed_entities:
@@ -145,11 +149,13 @@ Query: {query}"""
 
     async def _global_search(self, query: str, top_k: int) -> List[Dict[str, Any]]:
         embedding = await self.embedding_manager.embed_text(query)
-        reports = await self._vector_search(
+        reports = await self._hybrid_search(
+            query=query,
             index_name="community_report_vector",
+            fulltext_index_name="community_report_fulltext",
             label="CommunityReport",
             embedding_property="content_embedding",
-            query_embedding=embedding.tolist(),
+            query_embedding=self._embedding_to_list(embedding),
             top_k=max(top_k * 3, 6),
         )
         if not reports:
@@ -175,6 +181,33 @@ Query: {query}"""
             contexts.extend(await self._local_search(followup, max(2, top_k // 2), max_hops))
         return contexts
 
+    async def _hybrid_search(
+        self,
+        query: str,
+        index_name: str,
+        fulltext_index_name: str,
+        label: str,
+        embedding_property: str,
+        query_embedding: List[float],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        candidate_k = max(top_k * max(1, int(settings.hybrid_candidate_multiplier or 1)), top_k)
+        vector_results = await self._vector_search(
+            index_name=index_name,
+            label=label,
+            embedding_property=embedding_property,
+            query_embedding=query_embedding,
+            top_k=candidate_k,
+        )
+        keyword_results = await self._fulltext_search(
+            index_name=fulltext_index_name,
+            query=query,
+            top_k=candidate_k,
+        )
+        if not vector_results and not keyword_results:
+            return []
+        return self._merge_ranked_results(vector_results, keyword_results, top_k=top_k)
+
     async def _vector_search(
         self,
         index_name: str,
@@ -183,7 +216,7 @@ Query: {query}"""
         query_embedding: List[float],
         top_k: int,
     ) -> List[Dict[str, Any]]:
-        retrieval_query = f"""
+        retrieval_query = """
         CALL db.index.vector.queryNodes($index_name, $k, $embedding)
         YIELD node, score
         RETURN node.id AS id,
@@ -200,6 +233,80 @@ Query: {query}"""
         if records:
             return [self._record_to_context(record) for record in records]
         return await self._fallback_vector_scan(label, embedding_property, query_embedding, top_k)
+
+    async def _fulltext_search(self, index_name: str, query: str, top_k: int) -> List[Dict[str, Any]]:
+        fulltext_query = self._sanitize_fulltext_query(query)
+        if not fulltext_query:
+            return []
+        retrieval_query = """
+        CALL db.index.fulltext.queryNodes($index_name, $query, $options)
+        YIELD node, score
+        RETURN node.id AS id,
+               labels(node)[0] AS label,
+               coalesce(node.title, node.name, node.source_title, node.id) AS title,
+               coalesce(node.text, node.full_content, node.summary, node.description, "") AS text,
+               score,
+               properties(node) AS metadata
+        """
+        records = await self.graph_manager.query(
+            retrieval_query,
+            {"index_name": index_name, "query": fulltext_query, "options": {"limit": max(top_k, 1)}},
+        )
+        return [self._record_to_context(record) for record in records]
+
+    def _merge_ranked_results(
+        self,
+        vector_results: List[Dict[str, Any]],
+        keyword_results: List[Dict[str, Any]],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        merged: Dict[str, Dict[str, Any]] = {}
+
+        def add_result(context: Dict[str, Any], score_key: str) -> None:
+            key = context.get("id") or (context.get("type"), context.get("title"), context.get("text", "")[:80])
+            current = merged.get(key)
+            if current is None:
+                current = dict(context)
+                current["metadata"] = dict(context.get("metadata") or {})
+                current["_vector_score"] = 0.0
+                current["_keyword_score"] = 0.0
+                merged[key] = current
+            current[score_key] = max(float(current.get(score_key) or 0.0), float(context.get("score") or 0.0))
+            current["metadata"].update(context.get("metadata") or {})
+
+        for context in vector_results:
+            add_result(context, "_vector_score")
+        for context in keyword_results:
+            add_result(context, "_keyword_score")
+
+        max_vector = max((item.get("_vector_score", 0.0) for item in merged.values()), default=0.0) or 1.0
+        max_keyword = max((item.get("_keyword_score", 0.0) for item in merged.values()), default=0.0) or 1.0
+        vector_weight = max(0.0, float(settings.hybrid_vector_weight))
+        keyword_weight = max(0.0, float(settings.hybrid_keyword_weight))
+        graph_weight = max(0.0, float(settings.hybrid_graph_weight))
+        weight_total = vector_weight + keyword_weight + graph_weight or 1.0
+
+        ranked = []
+        for item in merged.values():
+            vector_score = float(item.pop("_vector_score", 0.0)) / max_vector
+            keyword_score = float(item.pop("_keyword_score", 0.0)) / max_keyword
+            graph_score = self._graph_signal(item)
+            hybrid_score = (
+                vector_weight * vector_score
+                + keyword_weight * keyword_score
+                + graph_weight * graph_score
+            ) / weight_total
+            item["score"] = round(hybrid_score, 6)
+            item.setdefault("metadata", {})
+            item["metadata"]["hybrid_scores"] = {
+                "vector": round(vector_score, 6),
+                "keyword": round(keyword_score, 6),
+                "graph": round(graph_score, 6),
+            }
+            ranked.append(item)
+
+        ranked.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+        return ranked[:top_k]
 
     async def _fallback_vector_scan(
         self,
@@ -238,13 +345,13 @@ Query: {query}"""
         WITH entity, min(length(path)) AS hop,
              collect(DISTINCT [
                 rel IN relationships(path) |
-                {
+                {{
                     source: startNode(rel).title,
                     target: endNode(rel).title,
                     type: coalesce(rel.relationship_type, type(rel)),
                     description: rel.description,
                     weight: rel.weight
-                }
+                }}
              ]) AS rel_paths
         RETURN entity.id AS id,
                "Entity" AS label,
@@ -357,7 +464,7 @@ Primer context:
 {self._combine_context_text(primer_reports[:4])}
 """
         try:
-            response = await self.llm_manager.generate_prompt(prompt, temperature=0.2, max_tokens=300)
+            response = await self.llm_manager.generate_prompt(prompt, temperature=0.2, max_tokens=300, json_mode=True)
             data = self._parse_json(response)
             queries = [str(item).strip() for item in data.get("queries", []) if str(item).strip()]
             return [query] + [item for item in queries if item.lower() != query.lower()]
@@ -392,7 +499,7 @@ Primer context:
         ]
 
     def _record_to_context(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        metadata = record.get("metadata") or {}
+        metadata = dict(record.get("metadata") or {})
         metadata.pop("text_embedding", None)
         metadata.pop("description_embedding", None)
         metadata.pop("content_embedding", None)
@@ -444,12 +551,62 @@ Primer context:
                 parts.append(f"{title}\n{text}")
         return "\n\n".join(parts)[:8000]
 
+    def _graph_signal(self, context: Dict[str, Any]) -> float:
+        metadata = context.get("metadata") or {}
+        entity_count = self._list_length(metadata.get("entity_ids"))
+        relationship_count = self._list_length(metadata.get("relationship_ids"))
+        matched_entity_count = self._list_length(metadata.get("matched_entities"))
+        degree = self._safe_float(metadata.get("degree"), 0.0)
+        frequency = self._safe_float(metadata.get("frequency"), 0.0)
+        rank = self._safe_float(metadata.get("rank"), 0.0)
+        size = self._safe_float(metadata.get("size"), 0.0)
+        signal = (
+            min(entity_count, 10) * 0.04
+            + min(relationship_count, 10) * 0.03
+            + min(matched_entity_count, 10) * 0.08
+            + min(degree, 20) * 0.02
+            + min(frequency, 20) * 0.015
+            + min(rank, 10) * 0.04
+            + min(size, 50) * 0.004
+        )
+        return min(signal, 1.0)
+
+    def _list_length(self, value: Any) -> int:
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, tuple):
+            return len(value)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return len(parsed)
+            except Exception:
+                return 0
+        return 0
+
+    def _sanitize_fulltext_query(self, query: str) -> str:
+        terms = re.findall(r"[\wÀ-ỹ]+", query, flags=re.UNICODE)
+        cleaned = [term for term in terms if len(term) > 1]
+        return " OR ".join(cleaned[:32])
+
+    def _embedding_to_list(self, embedding: Any) -> List[float]:
+        if hasattr(embedding, "tolist"):
+            return embedding.tolist()
+        return list(embedding)
+
     def _parse_json(self, value: str) -> Dict[str, Any]:
         start = value.find("{")
         end = value.rfind("}")
         if start == -1 or end == -1 or end <= start:
             return {}
         return json.loads(value[start : end + 1])
+
+    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return default
 
     def _cosine(self, left: Sequence[float], right: Sequence[float]) -> float:
         if not left or not right:

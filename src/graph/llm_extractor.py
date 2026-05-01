@@ -136,7 +136,7 @@ TEXT:
 
 Return ONLY valid JSON:"""
 
-            response = await self.provider.generate(prompt, temperature=0.2, max_tokens=1500)
+            response = await self.provider.generate(prompt, temperature=0.2, max_tokens=1500, json_mode=True)
             
             logger.debug(f"LLM response received: {len(response)} chars")
             
@@ -201,7 +201,7 @@ TEXT CONTEXT:
 
 Return ONLY valid JSON:"""
 
-            response = await self.provider.generate(prompt, temperature=0.1, max_tokens=800)
+            response = await self.provider.generate(prompt, temperature=0.1, max_tokens=800, json_mode=True)
             
             enriched_data = self._parse_json_object(response)
             
