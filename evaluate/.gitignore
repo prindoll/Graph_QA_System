@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Data & Vector Store (có thể rất lớn)
+data/
+vectorstore/
+graph_store/
+
+# OS
+Thumbs.db
+.DS_Store
