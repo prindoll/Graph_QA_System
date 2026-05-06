@@ -56,6 +56,7 @@ class LLMManager:
         context: List[str],
         system_prompt: Optional[str] = None,
         response_style: str = "detailed",
+        history: Optional[str] = None,
     ) -> str:
         if system_prompt is None:
             system_prompt = self._get_default_system_prompt(response_style)
@@ -76,7 +77,7 @@ class LLMManager:
             return "Tài liệu hiện có không cung cấp đủ thông tin để trả lời câu hỏi này."
 
         query_type = self._detect_query_type(query)
-        prompt = self._build_prompt(query, context_str, system_prompt, query_type)
+        prompt = self._build_prompt(query, context_str, system_prompt, query_type, history)
         temperature = self._get_temperature_for_query(query_type)
 
         answer = await self.provider.generate(
@@ -225,7 +226,14 @@ class LLMManager:
         }
         return temperature_map.get(query_type, 0.3)
 
-    def _build_prompt(self, query: str, context_str: str, system_prompt: str, query_type: str) -> str:
+    def _build_prompt(
+        self,
+        query: str,
+        context_str: str,
+        system_prompt: str,
+        query_type: str,
+        history: Optional[str] = None,
+    ) -> str:
         type_instructions = {
             "comparison": "Compare the items using only supported claims from the references.",
             "explanation": "Explain the concept clearly and ground every claim in the references.",
@@ -238,17 +246,23 @@ class LLMManager:
         }
 
         instruction = type_instructions.get(query_type, type_instructions["general"])
+        history_block = f"Conversation history:\n{history}\n\n" if history else ""
 
         prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", system_prompt),
                 (
                     "human",
-                    "Task: {instruction}\n\nReference Information:\n{context}\n\nQuestion: {query}\n\nAnswer:",
+                    "Task: {instruction}\n\nReference Information:\n{context}\n\n{history_block}Question: {query}\n\nAnswer:",
                 ),
             ]
         )
-        return prompt.format(instruction=instruction, context=context_str, query=query)
+        return prompt.format(
+            instruction=instruction,
+            context=context_str,
+            query=query,
+            history_block=history_block,
+        )
 
     def _post_process_answer(self, answer: str, query_type: str) -> str:
         answer = answer.strip()

@@ -897,6 +897,8 @@
         let isStreaming = false;
         const HISTORY_KEY = 'graphrag-chat-history-v1';
         const MAX_HISTORY = 25;
+        const CONTEXT_MESSAGES = 8;
+        const CONTEXT_CHARS = 2000;
         let chatHistory = [];
         let activeChatId = null;
         let activeAssistantIndex = null;
@@ -1089,6 +1091,28 @@
             renderConversationList();
         }
 
+        function buildHistoryPayload(maxMessages, maxChars) {
+            const conversation = getConversationById(activeChatId);
+            if (!conversation || !conversation.messages) return [];
+
+            const messages = conversation.messages.slice(-maxMessages);
+            const payload = [];
+            let total = 0;
+
+            for (const message of messages) {
+                const role = message.role === 'assistant' ? 'assistant' : 'user';
+                const content = String(message.content || '').trim();
+                if (!content) continue;
+                const remaining = maxChars - total;
+                if (remaining <= 0) break;
+                const clipped = content.length > remaining ? content.slice(0, remaining) : content;
+                payload.push({ role, content: clipped });
+                total += clipped.length;
+            }
+
+            return payload;
+        }
+
         async function loadStats() {
             try {
                 const response = await fetch('/api/stats');
@@ -1135,6 +1159,7 @@
             if (!message || isStreaming) return;
 
             ensureActiveConversation(message);
+            const historyPayload = buildHistoryPayload(CONTEXT_MESSAGES, CONTEXT_CHARS);
             
             document.getElementById('welcome-screen').style.display = 'none';
             document.getElementById('chat-messages').style.display = 'block';
@@ -1162,7 +1187,8 @@
                         response_style: 'detailed',
                         retrieval_mode: 'auto',
                         max_hops: 2,
-                        include_sources: true
+                        include_sources: true,
+                        history: historyPayload
                     })
                 });
 

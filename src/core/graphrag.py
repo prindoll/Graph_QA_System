@@ -62,6 +62,7 @@ class GraphRAG:
         retrieval_mode: Optional[str] = None,
         max_hops: Optional[int] = None,
         include_sources: bool = True,
+        history: Optional[str] = None,
     ) -> Dict[str, Any]:
         logger.info(f"Processing query: {query}")
         
@@ -75,7 +76,7 @@ class GraphRAG:
                 include_sources=include_sources,
             )
             
-            answer = await self._generate_answer(query, context)
+            answer = await self._generate_answer(query, context, history)
             resolved_mode = None
             if context:
                 resolved_mode = context[0].get("metadata", {}).get("retrieval_mode")
@@ -95,14 +96,20 @@ class GraphRAG:
             logger.error(f"Error processing query: {str(e)}")
             raise
     
-    async def _generate_answer(self, query: str, context: List[Dict[str, Any]]) -> str:
+    async def _generate_answer(
+        self,
+        query: str,
+        context: List[Dict[str, Any]],
+        history: Optional[str] = None,
+    ) -> str:
         try:
             if not context:
                 return "I don't have enough information to answer this question."
             
             answer = await self.llm_manager.generate(
                 query=query,
-                context=context
+                context=context,
+                history=history,
             )
             
             return answer.strip()

@@ -41,6 +41,11 @@ rag_instance: Optional[GraphRAG] = None
 chat_history: Dict[str, List[Dict[str, Any]]] = {}
 
 
+class ChatHistoryItem(BaseModel):
+    role: str
+    content: str
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
@@ -50,6 +55,7 @@ class ChatRequest(BaseModel):
     retrieval_mode: str = "auto"
     max_hops: int = 2
     include_sources: bool = True
+    history: Optional[List[ChatHistoryItem]] = None
 
 
 class ChatResponse(BaseModel):
@@ -84,6 +90,35 @@ def get_rag() -> GraphRAG:
     return rag_instance
 
 
+def build_history_text(
+    history: Optional[List[ChatHistoryItem]],
+    max_messages: int = 8,
+    max_chars: int = 1500,
+) -> str:
+    if not history:
+        return ""
+
+    items = history[-max_messages:]
+    lines = []
+    total = 0
+
+    for item in items:
+        content = (item.content or "").strip()
+        if not content:
+            continue
+        role = "User" if item.role == "user" else "Assistant"
+        line = f"{role}: {content}"
+        if total + len(line) > max_chars:
+            remaining = max_chars - total
+            if remaining > 0:
+                lines.append(line[:remaining])
+            break
+        lines.append(line)
+        total += len(line)
+
+    return "\n".join(lines)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return """
@@ -103,6 +138,8 @@ async def root():
 async def chat(request: ChatRequest):
     try:
         rag = get_rag()
+        history_text = build_history_text(request.history)
+        history_prompt = history_text if history_text else None
         
         session_id = request.session_id or str(uuid.uuid4())
         
@@ -116,6 +153,7 @@ async def chat(request: ChatRequest):
             retrieval_mode=request.retrieval_mode,
             max_hops=request.max_hops,
             include_sources=request.include_sources,
+            history=history_prompt,
         )
         
         chat_history[session_id].append({
@@ -155,6 +193,8 @@ async def chat_stream(request: ChatRequest):
         try:
             rag = get_rag()
             session_id = request.session_id or str(uuid.uuid4())
+            history_text = build_history_text(request.history)
+            history_prompt = history_text if history_text else None
             
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
             
@@ -176,7 +216,8 @@ async def chat_stream(request: ChatRequest):
             answer = await rag.llm_manager.generate(
                 query=request.message,
                 context=context,
-                response_style=request.response_style
+                response_style=request.response_style,
+                history=history_prompt,
             )
             
             words = answer.split(' ')
