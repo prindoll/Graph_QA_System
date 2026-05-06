@@ -1,4 +1,4 @@
-"""Project-wide configuration loaded from environment variables."""
+"""Settings loaded from environment variables."""
 
 import os
 from pathlib import Path
@@ -6,17 +6,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 VECTORSTORE_DIR = BASE_DIR / "vectorstore"
 DATA_DIR.mkdir(exist_ok=True)
 VECTORSTORE_DIR.mkdir(exist_ok=True)
 
-# API keys
+# API key
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-# HotPotQA dataset
+# HotPotQA
 HOTPOTQA_SPLIT = os.getenv("HOTPOTQA_SPLIT", "train")
 HOTPOTQA_SUBSET = os.getenv("HOTPOTQA_SUBSET", "fullwiki")
 HOTPOTQA_SAMPLE_SIZE = int(os.getenv("HOTPOTQA_SAMPLE_SIZE", "500"))
@@ -40,17 +39,17 @@ LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "512"))
 # Evaluation
 EVAL_SAMPLE_SIZE = int(os.getenv("EVAL_SAMPLE_SIZE", "50"))
 
-# ── GraphRAG ──────────────────────────────────────────────────────
+# GraphRAG files
 GRAPH_DIR = BASE_DIR / "graph_store"
 GRAPH_DIR.mkdir(exist_ok=True)
 GRAPH_VECTORSTORE_DIR = BASE_DIR / "graph_vectorstore"
 GRAPH_VECTORSTORE_DIR.mkdir(exist_ok=True)
 
-# Entity / relationship extraction
+# Graph extraction
 GRAPH_EXTRACT_MODEL = os.getenv("GRAPH_EXTRACT_MODEL", LLM_MODEL)
 GRAPH_EXTRACT_TEMPERATURE = float(os.getenv("GRAPH_EXTRACT_TEMPERATURE", "0"))
 
-# Graph traversal
+# Traversal
 GRAPH_TRAVERSAL_DEPTH = int(os.getenv("GRAPH_TRAVERSAL_DEPTH", "2"))
 GRAPH_TOP_K_ENTITIES = int(os.getenv("GRAPH_TOP_K_ENTITIES", "5"))
 GRAPH_COMMUNITY_RESOLUTION = float(os.getenv("GRAPH_COMMUNITY_RESOLUTION", "1.0"))

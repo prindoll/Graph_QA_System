@@ -1,11 +1,4 @@
-"""Comprehensive RAG evaluation on HotPotQA.
-
-Sections:
-  A. Text-based metrics  (EM, F1, ROUGE, BLEU)
-  B. Retrieval metrics   (Recall, Precision, MRR, Hit Rate)
-  C. LLM-based metrics   (Correctness, Faithfulness, Relevancy)
-  D. Analysis & reporting (by type, by level, error analysis, save)
-"""
+"""RAG evaluation helpers for HotPotQA."""
 
 from __future__ import annotations
 
@@ -31,9 +24,6 @@ from config.settings import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ── A. Text-based metrics ────────────────────────────────────────
 
 def _normalize_answer(text: str) -> str:
     """Lowercase, strip articles, punctuation, and extra whitespace."""
@@ -131,9 +121,6 @@ def bleu_score(prediction: str, ground_truth: str, max_n: int = 4) -> float:
         return 0.0
     return bp * math.exp(log_avg / effective_n)
 
-
-# ── B. Retrieval metrics ─────────────────────────────────────────
-
 def _get_retrieved_sources(docs) -> list[str]:
     """Extract source titles from retrieved documents (preserving order)."""
     return [doc.metadata.get("source", "") for doc in docs if doc.metadata.get("source")]
@@ -184,9 +171,6 @@ def hit_rate_at_k(retrieved_docs, supporting_facts_titles: list[str], k: int = 5
         return 0.0
     unique_sf = set(supporting_facts_titles)
     return float(any(s in unique_sf for s in _get_retrieved_sources(retrieved_docs)[:k]))
-
-
-# ── C. LLM-based metrics ──────────────────────────────────────────
 
 def _get_eval_llm():
     """Return a ChatOpenAI instance for evaluation."""
@@ -361,9 +345,6 @@ def llm_answer_similarity(
     except (json.JSONDecodeError, KeyError, ValueError):
         return {"score": -1, "reasoning": response.content}
 
-
-# ── D. Evaluation orchestration & reporting ──────────────────────
-
 def _invoke_rag_chain(rag_chain, retriever, question: str) -> dict[str, Any]:
     """Invoke the RAG chain and return a normalised result dict (including scored sources)."""
     try:
@@ -382,7 +363,7 @@ def _invoke_rag_chain(rag_chain, retriever, question: str) -> dict[str, Any]:
         doc.page_content for doc in context_docs
     ) if context_docs else ""
 
-    # Retrieve docs with similarity scores for the sources output
+    # Add source scores when the vector store exposes them.
     scored_sources: list[dict[str, Any]] = []
     try:
         vs = getattr(retriever, "vectorstore", None)
@@ -395,7 +376,7 @@ def _invoke_rag_chain(rag_chain, retriever, question: str) -> dict[str, Any]:
                     "metadata": {k: v for k, v in doc.metadata.items() if k != "original_content"},
                 })
     except Exception:
-        # Fallback: use context_docs without scores
+        # Graph-only contexts do not always have vector scores.
         for doc in context_docs:
             scored_sources.append({
                 "content": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
@@ -453,13 +434,11 @@ def evaluate_rag(
         context_docs = rag_result["context_docs"]
         context_text = rag_result["context_text"]
 
-        # Text metrics
         em = exact_match_score(prediction, ground_truth)
         prf = token_precision_recall_f1(prediction, ground_truth)
         rouges = rouge_scores(prediction, ground_truth)
         bleu = bleu_score(prediction, ground_truth)
 
-        # Retrieval metrics
         ret_recall = retrieval_recall(context_docs, sf_titles)
         ret_prec = retrieval_precision(context_docs, sf_titles)
         ret_f1_val = retrieval_f1(context_docs, sf_titles)
@@ -490,7 +469,6 @@ def evaluate_rag(
             "hit_rate_at_5": hit,
         }
 
-        # Optional LLM metrics
         if use_llm_eval and eval_llm is not None:
             correctness = llm_answer_correctness(question, prediction, ground_truth, eval_llm)
             faith = llm_faithfulness(question, prediction, context_text, eval_llm)
@@ -655,7 +633,6 @@ def save_results(
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     paths: dict[str, Path] = {}
 
-    # Build per-question result list (including top-5 sources)
     result_records: list[dict[str, Any]] = []
     for _, row in df.iterrows():
         record: dict[str, Any] = {
@@ -681,7 +658,6 @@ def save_results(
             "documents_used": row.get("documents_used", 0),
             "sources": row.get("sources", []),
         }
-        # Include LLM metrics if present
         for llm_col in ("llm_correctness", "llm_faithfulness",
                         "llm_answer_relevancy", "llm_context_relevancy", "llm_answer_similarity"):
             if llm_col in row and row[llm_col] is not None:
@@ -691,7 +667,6 @@ def save_results(
                     record[reason_col] = str(row[reason_col])
         result_records.append(record)
 
-    # Compute overall averages
     metric_cols = [
         c for c in df.columns
         if c not in ("question", "ground_truth", "prediction", "type", "level",
@@ -700,7 +675,7 @@ def save_results(
     ]
     averages = {col: round(float(df[col].mean()), 4) for col in metric_cols if col in df.columns}
 
-    # For LLM metrics, ignore failed judge outputs (-1).
+    # Failed judge calls are stored as -1.
     for llm_col in ("llm_correctness", "llm_faithfulness",
                     "llm_answer_relevancy", "llm_context_relevancy", "llm_answer_similarity"):
         if llm_col in df.columns:

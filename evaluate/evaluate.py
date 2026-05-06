@@ -1,15 +1,4 @@
-"""Standalone evaluation script for the RAG pipeline.
-
-Usage:
-  python evaluate.py                                  # Basic evaluation
-  python evaluate.py --use-llm-eval                   # + LLM-based metrics
-  python evaluate.py --eval-size 100 --chain-type lcel
-  python evaluate.py --analyze-only data/eval_detail_*.csv
-
-Results are saved to data/:
-  eval_detail_<ts>.csv, eval_summary_<ts>.json,
-  eval_by_type_<ts>.csv, eval_by_level_<ts>.csv, eval_errors_<ts>.csv
-"""
+"""Run RAG evaluation on HotPotQA."""
 
 from __future__ import annotations
 
@@ -48,7 +37,6 @@ def parse_args() -> argparse.Namespace:
 
 def display_summary_table(df, use_llm_eval: bool = False):
     """Print summary metric tables (text, retrieval, LLM)."""
-    # Text metrics
     table1 = Table(title="Text Metrics", show_header=True, header_style="bold cyan")
     table1.add_column("Metric", style="cyan", min_width=25)
     table1.add_column("Mean", style="green", justify="right")
@@ -67,7 +55,6 @@ def display_summary_table(df, use_llm_eval: bool = False):
                            f"{df[col].min():.4f}", f"{df[col].max():.4f}")
     console.print(table1)
 
-    # Retrieval metrics
     table2 = Table(title="Retrieval Metrics", show_header=True, header_style="bold cyan")
     table2.add_column("Metric", style="cyan", min_width=25)
     table2.add_column("Mean", style="green", justify="right")
@@ -84,7 +71,6 @@ def display_summary_table(df, use_llm_eval: bool = False):
                            f"{df[col].min():.4f}", f"{df[col].max():.4f}")
     console.print(table2)
 
-    # LLM metrics (optional)
     if use_llm_eval and "llm_correctness" in df.columns:
         table3 = Table(title="LLM Metrics (0-5)", show_header=True, header_style="bold cyan")
         table3.add_column("Metric", style="cyan", min_width=25)
@@ -177,7 +163,6 @@ def main():
     ))
 
     try:
-        # Analyze-only mode
         if args.analyze_only:
             import pandas as pd
             console.print(f"Loading results from: {args.analyze_only}")
@@ -187,7 +172,6 @@ def main():
             display_error_summary(df)
             return
 
-        # Full evaluation
         from config.settings import EVAL_SAMPLE_SIZE, HOTPOTQA_SAMPLE_SIZE
         from src.data_loader import load_and_prepare
         from src.vectorstore import load_vectorstore, get_retriever

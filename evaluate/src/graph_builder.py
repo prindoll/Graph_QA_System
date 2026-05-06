@@ -1,12 +1,4 @@
-"""Build a knowledge graph from HotPotQA documents using LLM-based extraction.
-
-Pipeline:
-  1. Deduplicate documents by source title (avoid redundant LLM calls).
-  2. Extract (subject, predicate, object) triples via LLM with concurrent workers.
-  3. Store triples in a NetworkX graph (entities = nodes, relationships = edges).
-  4. Detect communities using the Louvain algorithm for global context summaries.
-  5. Persist / load the graph to/from disk.
-"""
+"""Build a HotPotQA knowledge graph."""
 
 from __future__ import annotations
 
@@ -30,8 +22,6 @@ from config.settings import (
 )
 
 logger = logging.getLogger(__name__)
-
-# ── Entity / relationship extraction ──────────────────────────────
 
 EXTRACTION_SYSTEM_PROMPT = (
     "You are an expert knowledge-graph builder. Given a text passage, "
@@ -65,10 +55,7 @@ def extract_triples_from_text(
     text: str,
     llm: ChatOpenAI | None = None,
 ) -> list[dict[str, str]]:
-    """Extract (subject, predicate, object) triples from a text passage using the LLM.
-
-    Returns a list of dicts: [{"subject": ..., "predicate": ..., "object": ...}, ...]
-    """
+    """Extract SPO triples from a text passage."""
     if llm is None:
         llm = _get_extraction_llm()
 
@@ -82,14 +69,13 @@ def extract_triples_from_text(
     response = (prompt | llm).invoke({"text": text})
     raw = response.content.strip()
 
-    # Robust extraction: find the JSON array in the response
-    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    # The model may wrap JSON in markdown fences.
     import re
     fence_match = re.search(r"```(?:json)?\s*\n?(.*?)```", raw, re.DOTALL)
     if fence_match:
         raw = fence_match.group(1).strip()
 
-    # Fallback: find first '[' to last ']'
+    # Last resort: keep the JSON-looking slice.
     if not raw.startswith("["):
         start = raw.find("[")
         end = raw.rfind("]")
@@ -110,7 +96,7 @@ def extract_triples_from_text(
                 })
         return valid
     except json.JSONDecodeError:
-        # Attempt to recover truncated JSON: find last complete object
+        # Recover partial output when the model stops mid-array.
         last_brace = raw.rfind("}")
         if last_brace > 0:
             truncated = raw[: last_brace + 1] + "]"
@@ -133,9 +119,6 @@ def extract_triples_from_text(
         logger.warning("Failed to parse extraction result: %.200s", raw)
         return []
 
-
-# ── Knowledge graph construction ──────────────────────────────────
-
 def _deduplicate_documents(documents: list[Document]) -> list[Document]:
     """Keep only one document per unique source title (first occurrence)."""
     seen: set[str] = set()
@@ -155,7 +138,7 @@ def _extract_worker(
     doc: Document,
     llm: ChatOpenAI,
 ) -> tuple[Document, list[dict[str, str]]]:
-    """Worker function for concurrent extraction (one doc at a time)."""
+    """Extract triples for one document."""
     triples = extract_triples_from_text(doc.page_content, llm=llm)
     return doc, triples
 
@@ -166,26 +149,23 @@ def _add_triples_to_graph(
     source: str,
     text: str,
 ):
-    """Insert extracted triples into the graph (thread-safe if called from main thread)."""
+    """Insert extracted triples into the graph."""
     for t in triples:
         subj = t["subject"]
         obj = t["object"]
         pred = t["predicate"]
 
-        # Add / update subject node
         if G.has_node(subj):
             G.nodes[subj]["doc_sources"].add(source)
             G.nodes[subj]["doc_texts"].append(text[:500])
         else:
             G.add_node(subj, label=subj, doc_sources={source}, doc_texts=[text[:500]])
 
-        # Add / update object node
         if G.has_node(obj):
             G.nodes[obj]["doc_sources"].add(source)
         else:
             G.add_node(obj, label=obj, doc_sources={source}, doc_texts=[])
 
-        # Add / update edge
         if G.has_edge(subj, obj):
             edge_data = G.edges[subj, obj]
             edge_data["predicates"].add(pred)
@@ -201,26 +181,11 @@ def build_knowledge_graph(
     max_workers: int = 8,
     deduplicate: bool = True,
 ) -> nx.DiGraph:
-    """Build a directed knowledge graph from a list of LangChain Documents.
-
-    Optimisations:
-      - Deduplicate documents by source title (avoids redundant LLM calls).
-      - Concurrent LLM calls using ThreadPoolExecutor (default 8 workers).
-
-    Each node stores:
-      - label: entity name
-      - doc_sources: set of source titles where it appeared
-      - doc_texts: list of source text snippets
-
-    Each edge stores:
-      - predicate: relationship label
-      - doc_sources: set of source titles
-      - weight: count of times this relationship was extracted
-    """
+    """Build a directed graph from LangChain documents."""
     if llm is None:
         llm = _get_extraction_llm()
 
-    # Deduplicate to reduce LLM calls (e.g. 4970 docs → ~500 unique sources)
+    # Dedup keeps repeated HotPotQA titles from wasting LLM calls.
     if deduplicate:
         docs_to_process = _deduplicate_documents(documents)
     else:
@@ -229,7 +194,6 @@ def build_knowledge_graph(
     G = nx.DiGraph()
     total_triples = 0
 
-    # Concurrent extraction with progress bar
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(_extract_worker, doc, llm): doc
@@ -255,9 +219,6 @@ def build_knowledge_graph(
     )
     return G
 
-
-# ── Community detection ───────────────────────────────────────────
-
 def detect_communities(
     G: nx.DiGraph,
     resolution: float = 1.0,
@@ -270,7 +231,7 @@ def detect_communities(
     try:
         communities = nx.community.louvain_communities(undirected, resolution=resolution, seed=42)
     except AttributeError:
-        # Fallback for older NetworkX versions
+        # Older NetworkX versions do not include Louvain.
         from networkx.algorithms.community import greedy_modularity_communities
         communities = list(greedy_modularity_communities(undirected))
 
@@ -304,14 +265,11 @@ def get_community_summaries(
             preds = ", ".join(data.get("predicates", set()))
             summaries[cu]["relationships"].append(f"{u} --[{preds}]--> {v}")
 
-    # Convert sets to lists for serialisation
+    # JSON/pickle friendly.
     for cid in summaries:
         summaries[cid]["sources"] = list(summaries[cid]["sources"])
 
     return summaries
-
-
-# ── Persistence ───────────────────────────────────────────────────
 
 def _prepare_for_pickle(G: nx.DiGraph) -> nx.DiGraph:
     """Convert sets in node/edge data to lists for pickle serialisation."""

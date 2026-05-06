@@ -1,10 +1,5 @@
 ﻿#!/usr/bin/env python
-"""Index HotPotQA context passages into the GraphRAG graph store.
-
-This script intentionally indexes only corpus context: article titles and
-sentences. It does not persist questions, answers, or supporting_facts so the
-resulting graph can be used for non-oracle QA/retrieval experiments.
-"""
+"""Index HotPotQA contexts into the graph."""
 
 import argparse
 import asyncio
@@ -105,8 +100,7 @@ def resolve_input_path(raw_path: str) -> Path:
     if path.exists():
         return path
 
-    # Some shells treat backslashes as escape characters, so
-    # data\file.json can arrive as datafile.json. Repair that common case.
+    # Fix a common copied Windows path case.
     if not any(sep in raw_path for sep in ("/", "\\")) and raw_path.startswith("data"):
         repaired = Path("data") / raw_path[len("data"):]
         if repaired.exists():
@@ -267,6 +261,7 @@ def add_mention_edges(
     articles: Dict[str, ArticleAccumulator],
     edges: Dict[Tuple[str, str, str], Dict[str, Any]],
 ) -> None:
+    # Link articles when a sentence mentions another title.
     title_patterns = {
         title_key: make_title_pattern(article.title)
         for title_key, article in articles.items()
@@ -433,6 +428,7 @@ async def main() -> None:
     report["limit"] = args.limit
     report["graph_type"] = args.graph_type
     report["dry_run"] = args.dry_run
+    # Keep reports clear about what went into the graph.
     report["leakage_policy"] = "context_only_no_question_answer_or_supporting_facts"
 
     if report_path:
@@ -443,7 +439,6 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 

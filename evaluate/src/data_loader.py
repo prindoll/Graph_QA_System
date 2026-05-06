@@ -1,4 +1,4 @@
-"""Load and preprocess the HotPotQA dataset from Hugging Face."""
+"""HotPotQA loading helpers."""
 
 from __future__ import annotations
 

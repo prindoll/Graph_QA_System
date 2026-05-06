@@ -1,4 +1,4 @@
-"""Construct the RAG chain using standard LangChain components."""
+"""Standard RAG chain helpers."""
 
 from __future__ import annotations
 
@@ -22,8 +22,6 @@ from config.settings import (
 logger = logging.getLogger(__name__)
 
 
-# --- LLM ---
-
 def get_llm(
     model: str = LLM_MODEL,
     temperature: float = LLM_TEMPERATURE,
@@ -39,9 +37,7 @@ def get_llm(
     )
 
 
-# --- Prompt templates ---
-
-# Used by create_retrieval_chain (variables: {context}, {input})
+# Prompt for create_retrieval_chain: {context}, {input}
 RETRIEVAL_CHAIN_PROMPT = ChatPromptTemplate.from_messages([
     (
         "system",
@@ -58,7 +54,7 @@ RETRIEVAL_CHAIN_PROMPT = ChatPromptTemplate.from_messages([
     ("human", "{input}"),
 ])
 
-# Used by the manual LCEL chain (variables: {context}, {question})
+# Prompt for LCEL: {context}, {question}
 LCEL_RAG_PROMPT = ChatPromptTemplate.from_messages([
     (
         "system",
@@ -75,50 +71,8 @@ LCEL_RAG_PROMPT = ChatPromptTemplate.from_messages([
     ("human", "{question}"),
 ])
 
-# --- Alternative: strict concise prompts (may cause "I don't know" on reasoning questions) ---
-# RETRIEVAL_CHAIN_PROMPT = ChatPromptTemplate.from_messages([
-#     (
-#         "system",
-#         "You are a helpful question-answering assistant. Answer the question "
-#         "based ONLY on the provided context.\n\n"
-#         "Rules:\n"
-#         "- Answer as concisely as possible — ideally just the entity name, "
-#         "number, date, or a short phrase.\n"
-#         "- For yes/no questions, answer with just 'Yes' or 'No'.\n"
-#         "- Do NOT add explanations, reasoning, or extra details unless the "
-#         "question explicitly asks for them.\n"
-#         "- If the answer is not found in the context, say 'I don't know'.\n\n"
-#         "Context:\n{context}",
-#     ),
-#     ("human", "{input}"),
-# ])
-#
-# LCEL_RAG_PROMPT = ChatPromptTemplate.from_messages([
-#     (
-#         "system",
-#         "You are a helpful question-answering assistant. Answer the question "
-#         "based ONLY on the context passages below.\n\n"
-#         "Rules:\n"
-#         "- Answer as concisely as possible — ideally just the entity name, "
-#         "number, date, or a short phrase.\n"
-#         "- For yes/no questions, answer with just 'Yes' or 'No'.\n"
-#         "- Do NOT add explanations, reasoning, or extra details unless the "
-#         "question explicitly asks for them.\n"
-#         "- If the context is insufficient, say 'I don't know'.\n\n"
-#         "Context:\n{context}",
-#     ),
-#     ("human", "{question}"),
-# ])
-
-
-# --- RAG chain: create_retrieval_chain approach ---
-
 def build_retrieval_chain(retriever, llm=None):
-    """Build a standard LangChain retrieval chain.
-
-    Input:  {"input": "<question>"}
-    Output: {"input": ..., "context": [...], "answer": "..."}
-    """
+    """Build a standard LangChain retrieval chain."""
     if llm is None:
         llm = get_llm()
     combine_docs_chain = create_stuff_documents_chain(llm=llm, prompt=RETRIEVAL_CHAIN_PROMPT)
@@ -127,19 +81,13 @@ def build_retrieval_chain(retriever, llm=None):
     return rag_chain
 
 
-# --- RAG chain: LCEL approach ---
-
 def _format_docs(docs: list[Document]) -> str:
     """Join document contents into a single context string."""
     return "\n\n---\n\n".join(doc.page_content for doc in docs)
 
 
 def build_lcel_rag_chain(retriever, llm=None):
-    """Build a RAG chain using LCEL (LangChain Expression Language).
-
-    Input:  {"question": "<question>"}
-    Output: string answer
-    """
+    """Build a RAG chain using LCEL."""
     if llm is None:
         llm = get_llm()
     rag_chain = (
@@ -155,8 +103,6 @@ def build_lcel_rag_chain(retriever, llm=None):
     return rag_chain
 
 
-# --- Query helper ---
-
 def ask(chain, question: str) -> str:
     """Send a question to the RAG chain and return the answer string."""
     try:
@@ -165,6 +111,6 @@ def ask(chain, question: str) -> str:
             return result.get("answer", str(result))
         return str(result)
     except Exception:
-        # LCEL chain accepts a raw string
+        # LCEL accepts a raw string.
         result = chain.invoke(question)
         return str(result)

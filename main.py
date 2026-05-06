@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""GraphRAG command line interface."""
+"""Small CLI for indexing and querying GraphRAG."""
 
 import argparse
 import asyncio
@@ -38,6 +38,7 @@ async def index_pdf(
         clear=clear,
     )
     stats = await rag.graph_manager.get_stats()
+    # Show graph totals after this indexing run.
     result["total_nodes"] = stats.get("nodes", 0)
     result["total_edges"] = stats.get("edges", 0)
     return result
@@ -111,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     index_parser.add_argument("path")
     index_parser.add_argument("--start-page", type=int, default=0)
     index_parser.add_argument("--end-page", type=int, default=None)
+    # Kept so older commands do not fail.
     index_parser.add_argument("--batch", type=int, default=None, help="Accepted for compatibility; indexing uses text-unit chunking.")
     index_parser.add_argument("--clear", action="store_true")
 

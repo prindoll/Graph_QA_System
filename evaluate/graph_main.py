@@ -1,17 +1,4 @@
-"""Main entry point — GraphRAG pipeline for HotPotQA.
-
-This script builds a knowledge graph from HotPotQA documents, then uses
-graph-based retrieval (optionally combined with vector search) to answer
-questions and evaluate performance.
-
-Usage:
-  python graph_main.py                              # Full pipeline (build graph + evaluate)
-  python graph_main.py --mode build                 # Build knowledge graph only
-  python graph_main.py --mode evaluate              # Evaluate only (requires existing graph)
-  python graph_main.py --mode query                 # Interactive QA
-  python graph_main.py --mode evaluate --graph-mode graph_only   # Graph-only (no vector)
-  python graph_main.py --eval-size 100              # Evaluate 100 samples
-"""
+"""CLI for the HotPotQA GraphRAG pipeline."""
 
 from __future__ import annotations
 
@@ -30,7 +17,7 @@ logging.basicConfig(
     datefmt="[%X]",
     handlers=[RichHandler(rich_tracebacks=True)],
 )
-# Suppress noisy HTTP logs
+# Keep third-party clients quiet.
 for _noisy in ("httpx", "httpcore", "huggingface_hub", "openai"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
@@ -55,8 +42,6 @@ def setup_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# ── Pipeline steps ────────────────────────────────────────────────
-
 def step_build_graph(sample_size: int | None = None):
     """Load HotPotQA data, build vector store, and construct the knowledge graph."""
     from config.settings import HOTPOTQA_SAMPLE_SIZE
@@ -66,26 +51,21 @@ def step_build_graph(sample_size: int | None = None):
 
     n = sample_size or HOTPOTQA_SAMPLE_SIZE
 
-    # Step 1: Load data
     console.print(Panel(f"[bold cyan]Step 1:[/] Load HotPotQA ({n} samples)"))
     documents, qa_pairs = load_and_prepare(sample_size=n)
     console.print(f"[green]OK[/] {len(documents)} documents, {len(qa_pairs)} QA pairs.")
 
-    # Step 2: Build vector store (needed for hybrid mode)
     console.print(Panel("[bold cyan]Step 2:[/] Build Vector Store (Chroma)"))
     vectorstore = build_vectorstore(documents)
     console.print(f"[green]OK[/] Indexed {len(documents)} documents.")
 
-    # Step 3: Build knowledge graph
     console.print(Panel("[bold cyan]Step 3:[/] Build Knowledge Graph (LLM extraction)"))
     console.print("[dim]Extracting entities and relationships from documents...[/dim]")
     G = build_knowledge_graph(documents)
 
-    # Step 4: Community detection
     console.print(Panel("[bold cyan]Step 4:[/] Detect Communities"))
     node_to_community = detect_communities(G)
 
-    # Display graph stats
     stats = graph_stats(G)
     table = Table(title="Knowledge Graph Statistics")
     table.add_column("Metric", style="cyan")
@@ -98,12 +78,10 @@ def step_build_graph(sample_size: int | None = None):
     table.add_row("Communities", str(len(set(node_to_community.values()))))
     console.print(table)
 
-    # Top nodes
     console.print("[bold]Top 10 nodes by degree:[/]")
     for name, deg in stats["top_nodes_by_degree"]:
         console.print(f"  {name}: {deg}")
 
-    # Save graph
     save_graph(G)
     console.print("[green]OK[/] Knowledge graph saved.")
 
@@ -128,34 +106,29 @@ def step_evaluate(
         f"{', + LLM eval' if use_llm_eval else ''}"
     ))
 
-    # Load graph if not provided
+    # Reuse graph/vector objects from the full pipeline when available.
     if G is None:
         from src.graph_builder import load_graph
         console.print("[dim]Loading knowledge graph from disk...[/dim]")
         G = load_graph()
 
-    # Load retriever if not provided (needed for hybrid mode)
     if retriever is None and graph_mode == "hybrid":
         from src.vectorstore import load_vectorstore, get_retriever
         vectorstore = load_vectorstore()
         retriever = get_retriever(vectorstore)
 
-    # Load QA pairs if not provided
     if qa_pairs is None:
         from src.data_loader import load_and_prepare
         _, qa_pairs = load_and_prepare()
 
-    # Build GraphRAG chain
     chain = build_graph_rag_chain(
         graph=G,
         retriever=retriever,
         mode=graph_mode,
     )
 
-    # Run evaluation (reuse existing evaluation framework)
     df = evaluate_rag(chain, retriever, qa_pairs, sample_size=n, use_llm_eval=use_llm_eval)
 
-    # Text metrics table
     table1 = Table(title="GraphRAG — Text Metrics")
     table1.add_column("Metric", style="cyan")
     table1.add_column("Score", style="green", justify="right")
@@ -169,7 +142,6 @@ def step_evaluate(
             table1.add_row(label, f"{df[col].mean():.4f}")
     console.print(table1)
 
-    # Retrieval metrics table
     table2 = Table(title="GraphRAG — Retrieval Metrics")
     table2.add_column("Metric", style="cyan")
     table2.add_column("Score", style="green", justify="right")
@@ -182,7 +154,6 @@ def step_evaluate(
     table2.add_row("Samples", str(len(df)))
     console.print(table2)
 
-    # LLM metrics table
     if use_llm_eval and "llm_correctness" in df.columns:
         table3 = Table(title="GraphRAG — LLM Metrics (0-5)")
         table3.add_column("Metric", style="cyan")
@@ -199,7 +170,6 @@ def step_evaluate(
                     table3.add_row(label, f"{valid.mean():.2f} / 5.00")
         console.print(table3)
 
-    # Breakdown analysis
     by_type = analyze_by_type(df)
     if not by_type.empty:
         table_type = Table(title="GraphRAG — By Question Type")
@@ -246,7 +216,6 @@ def step_evaluate(
             )
         console.print(table_level)
 
-    # Save results
     paths = save_results(df, prefix="graph_eval")
     for key, path in paths.items():
         console.print(f"[green]OK[/] {key}: {path}")
@@ -279,7 +248,7 @@ def step_query(G=None, retriever=None, graph_mode: str = "hybrid"):
         result = chain.invoke({"input": question})
         console.print(f"[bold green]A:[/] {result.get('answer', '')}")
 
-        # Show graph info
+        # Print matched graph clues under the answer.
         entities = result.get("entities_extracted", [])
         matched = result.get("matched_nodes", [])
         if entities:
@@ -290,8 +259,6 @@ def step_query(G=None, retriever=None, graph_mode: str = "hybrid"):
 
     return chain
 
-
-# ── Main ──────────────────────────────────────────────────────────
 
 def main():
     args = setup_args()
@@ -328,7 +295,6 @@ def main():
                 use_llm_eval=args.use_llm_eval,
             )
 
-            # Interactive QA
             console.print("\n[dim]Enter a question (type 'quit' to exit):[/dim]")
             from src.graph_rag_chain import build_graph_rag_chain, ask as graph_ask
             chain = build_graph_rag_chain(graph=G, retriever=retriever, mode=args.graph_mode)

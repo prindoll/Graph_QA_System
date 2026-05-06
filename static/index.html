@@ -46,7 +46,6 @@
             color-scheme: light;
         }
 
-        /* Sidebar */
         .sidebar {
             width: 280px;
             background-color: var(--sidebar-bg);
@@ -179,7 +178,6 @@
             padding: 4px 12px 12px;
         }
 
-        /* Main Content */
         .main-content {
             flex: 1;
             display: flex;
@@ -242,7 +240,6 @@
             background-color: var(--accent-hover);
         }
 
-        /* Chat Area */
         .chat-container {
             flex: 1;
             overflow-y: auto;
@@ -405,7 +402,7 @@
             max-height: none;
         }
 
-        /* Typing Indicator */
+        /* Small loading dots while waiting for the stream. */
         .typing-indicator {
             display: flex;
             gap: 4px;
@@ -428,7 +425,6 @@
             30% { transform: translateY(-8px); }
         }
 
-        /* Input Area */
         .input-container {
             padding: 12px 24px 24px;
             background: linear-gradient(180deg, rgba(246, 245, 241, 0) 0%, var(--bg-primary) 40%);
@@ -508,7 +504,6 @@
             color: var(--text-secondary);
         }
 
-        /* Welcome Screen */
         .welcome-screen {
             flex: 1;
             display: flex;
@@ -577,7 +572,6 @@
             color: var(--text-secondary);
         }
 
-        /* Upload Modal */
         .modal-overlay {
             position: fixed;
             inset: 0;
@@ -713,7 +707,6 @@
             cursor: not-allowed;
         }
 
-        /* Scrollbar */
         ::-webkit-scrollbar {
             width: 8px;
         }
@@ -731,7 +724,7 @@
             background: var(--text-secondary);
         }
 
-        /* Responsive */
+        /* Mobile layout. */
         @media (max-width: 768px) {
             .sidebar {
                 display: none;
@@ -748,7 +741,6 @@
     </style>
 </head>
 <body>
-    <!-- Sidebar -->
     <aside class="sidebar">
         <div class="sidebar-header">
             <button class="new-chat-btn" onclick="newChat()">
@@ -785,7 +777,6 @@
         </div>
     </aside>
 
-    <!-- Main Content -->
     <main class="main-content">
         <header class="header">
             <div class="header-title">
@@ -804,9 +795,7 @@
             </div>
         </header>
 
-        <!-- Chat Container -->
         <div class="chat-container" id="chat-container">
-            <!-- Welcome Screen -->
             <div class="welcome-screen" id="welcome-screen">
                 <div class="welcome-logo">
                     <svg width="32" height="32" viewBox="0 0 24 24" fill="white">
@@ -817,11 +806,9 @@
                 <p class="welcome-subtitle">Ask questions about algorithms</p>
             </div>
 
-            <!-- Chat Messages -->
             <div class="chat-messages" id="chat-messages" style="display: none;"></div>
         </div>
 
-        <!-- Input Area -->
         <div class="input-container">
             <div class="input-wrapper">
                 <div class="input-box">
@@ -846,7 +833,6 @@
         </div>
     </main>
 
-    <!-- Upload Modal -->
     <div class="modal-overlay" id="upload-modal">
         <div class="modal">
             <div class="modal-header">

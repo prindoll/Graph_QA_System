@@ -1,4 +1,4 @@
-"""Build and manage the Chroma vector store for the RAG pipeline."""
+"""Chroma vector store helpers."""
 
 from __future__ import annotations
 

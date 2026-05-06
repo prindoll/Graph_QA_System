@@ -1,7 +1,5 @@
 #!/usr/bin/env python
-"""
-GraphRAG - FastAPI Server with Chat Interface
-"""
+"""FastAPI app for the chat UI."""
 import asyncio
 import uuid
 from datetime import datetime

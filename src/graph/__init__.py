@@ -1,4 +1,4 @@
-"""Graph Module"""
+"""Graph exports."""
 from .base import GraphManager
 from .neo4j_manager import Neo4jManager
 from .networkx_manager import NetworkXManager

@@ -1,11 +1,4 @@
-"""Main entry point — RAG pipeline for HotPotQA using LangChain.
-
-Usage:
-  python main.py                    # Full pipeline (index + evaluate + QA)
-  python main.py --mode index       # Index data only
-  python main.py --mode query       # Interactive QA (requires existing index)
-  python main.py --mode evaluate    # Evaluate only
-"""
+"""CLI for the HotPotQA RAG pipeline."""
 
 from __future__ import annotations
 
@@ -24,7 +17,7 @@ logging.basicConfig(
     datefmt="[%X]",
     handlers=[RichHandler(rich_tracebacks=True)],
 )
-# Suppress noisy HTTP request logs from httpx / huggingface_hub / openai
+# Keep third-party clients quiet.
 for _noisy in ("httpx", "httpcore", "huggingface_hub", "openai"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
@@ -48,10 +41,8 @@ def setup_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# --- Pipeline steps ---
-
 def step_index(sample_size: int | None = None):
-    """Step 1-2: Load data and build the vector store."""
+    """Load data and build the vector store."""
     from src.data_loader import load_and_prepare
     from src.vectorstore import build_vectorstore
     from config.settings import HOTPOTQA_SAMPLE_SIZE
@@ -67,7 +58,7 @@ def step_index(sample_size: int | None = None):
 
 
 def step_query(chain_type: str = "retrieval"):
-    """Step 3-4: Load vector store and start interactive QA."""
+    """Load vector store and start interactive QA."""
     from src.vectorstore import load_vectorstore, get_retriever
     from src.rag_chain import build_retrieval_chain, build_lcel_rag_chain, ask
 
@@ -96,7 +87,7 @@ def step_evaluate(
     chain_type: str = "retrieval",
     use_llm_eval: bool = False,
 ):
-    """Step 5: Evaluate RAG performance."""
+    """Evaluate RAG performance."""
     from src.vectorstore import load_vectorstore, get_retriever
     from src.rag_chain import build_retrieval_chain, build_lcel_rag_chain
     from src.evaluation import evaluate_rag, save_results, analyze_by_type, analyze_by_level
@@ -108,7 +99,7 @@ def step_evaluate(
         f"{', + LLM eval' if use_llm_eval else ''}"
     ))
 
-    # Load components if not provided
+    # Reuse objects from the full pipeline when available.
     if retriever is None or chain is None:
         vectorstore = load_vectorstore()
         retriever = get_retriever(vectorstore)
@@ -121,7 +112,6 @@ def step_evaluate(
 
     df = evaluate_rag(chain, retriever, qa_pairs, sample_size=n, use_llm_eval=use_llm_eval)
 
-    # Text metrics table
     table1 = Table(title="Text Metrics")
     table1.add_column("Metric", style="cyan")
     table1.add_column("Score", style="green", justify="right")
@@ -135,7 +125,6 @@ def step_evaluate(
             table1.add_row(label, f"{df[col].mean():.4f}")
     console.print(table1)
 
-    # Retrieval metrics table
     table2 = Table(title="Retrieval Metrics")
     table2.add_column("Metric", style="cyan")
     table2.add_column("Score", style="green", justify="right")
@@ -148,7 +137,6 @@ def step_evaluate(
     table2.add_row("Samples", str(len(df)))
     console.print(table2)
 
-    # LLM metrics table (if applicable)
     if use_llm_eval and "llm_correctness" in df.columns:
         table3 = Table(title="LLM Metrics (0-5)")
         table3.add_column("Metric", style="cyan")
@@ -165,7 +153,6 @@ def step_evaluate(
                     table3.add_row(label, f"{valid.mean():.2f} / 5.00")
         console.print(table3)
 
-    # Breakdown analysis
     by_type = analyze_by_type(df)
     if not by_type.empty:
         table_type = Table(title="By Question Type")
@@ -212,14 +199,11 @@ def step_evaluate(
             )
         console.print(table_level)
 
-    # Save results
     paths = save_results(df)
     for key, path in paths.items():
         console.print(f"[green]OK[/] {key}: {path}")
     return df
 
-
-# --- Main ---
 
 def main():
     args = setup_args()
@@ -258,7 +242,6 @@ def main():
                 use_llm_eval=args.use_llm_eval,
             )
 
-            # Interactive QA
             console.print("\n[dim]Enter a question (type 'quit' to exit):[/dim]")
             from src.rag_chain import ask
             while True:

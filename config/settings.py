@@ -1,4 +1,4 @@
-"""Configuration settings for GraphRAG"""
+"""Runtime settings."""
 from typing import Any, Optional
 
 from pydantic import field_validator
@@ -6,11 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Application settings"""
-
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
     
-    # LLM Configuration
+    # LLM
     llm_provider: str = "openai"
     llm_model: str = "gpt-4"
     openai_api_key: Optional[str] = None
@@ -23,23 +21,23 @@ class Settings(BaseSettings):
     max_llm_community_reports: int = 25
     min_llm_community_size: int = 3
     
-    # Embedding Configuration
+    # Embeddings
     embedding_provider: str = "openai"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536
     
-    # Graph Database Configuration
+    # Graph database
     graph_db_type: str = "neo4j"
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
     neo4j_password: str = "password"
     neo4j_database: str = "neo4j"
     
-    # Vector Store Configuration
+    # Vector store
     vector_store_type: str = "chroma"
     chroma_persist_directory: str = "./data/chroma_db"
     
-    # Retrieval Configuration
+    # Retrieval
     retrieval_mode_default: str = "auto"
     retrieval_top_k: int = 5
     max_hops: int = 2
@@ -54,7 +52,7 @@ class Settings(BaseSettings):
     hybrid_graph_weight: float = 0.10
     community_algorithm: str = "leiden"
     
-    # General Settings
+    # App
     log_level: str = "INFO"
     debug: bool = False
     batch_size: int = 32
@@ -75,5 +73,4 @@ class Settings(BaseSettings):
         return bool(value)
     
 
-# Global settings instance
 settings = Settings()

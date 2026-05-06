@@ -1,12 +1,4 @@
-"""Graph-aware retrieval for GraphRAG.
-
-Retrieval strategy:
-  1. Extract key entities from the user query using LLM.
-  2. Fuzzy-match extracted entities to nodes in the knowledge graph.
-  3. Traverse the graph up to *depth* hops to gather related entities and edge context.
-  4. Optionally combine with vector-similarity results from Chroma.
-  5. Return assembled context documents with graph provenance metadata.
-"""
+"""Graph retrieval helpers for GraphRAG."""
 
 from __future__ import annotations
 
@@ -27,9 +19,6 @@ from config.settings import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ── Entity extraction from query ──────────────────────────────────
 
 QUERY_ENTITY_PROMPT = (
     "You are an expert at identifying key entities in questions. "
@@ -68,7 +57,7 @@ def extract_query_entities(
     response = (prompt | llm).invoke({"question": question})
     raw = response.content.strip()
 
-    # Strip markdown fences
+    # Some models return fenced JSON.
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[-1]
     if raw.endswith("```"):
@@ -83,9 +72,6 @@ def extract_query_entities(
         logger.warning("Failed to parse query entities: %.120s", raw)
     return []
 
-
-# ── Graph node matching ───────────────────────────────────────────
-
 def _normalise(s: str) -> str:
     """Lowercase and strip for fuzzy matching."""
     return s.lower().strip()
@@ -96,10 +82,7 @@ def match_entities_to_graph(
     G: nx.DiGraph,
     top_k: int = GRAPH_TOP_K_ENTITIES,
 ) -> list[str]:
-    """Match extracted entity names to graph node names (exact + substring match).
-
-    Returns the matched node names (up to *top_k*).
-    """
+    """Match extracted entity names to graph node names."""
     node_names = list(G.nodes())
     node_names_lower = {_normalise(n): n for n in node_names}
     matched: list[str] = []
@@ -107,18 +90,16 @@ def match_entities_to_graph(
     for entity in entities:
         ent_lower = _normalise(entity)
 
-        # Exact match
         if ent_lower in node_names_lower:
             matched.append(node_names_lower[ent_lower])
             continue
 
-        # Substring match (entity in node name, or node name in entity)
         for nl, original in node_names_lower.items():
             if ent_lower in nl or nl in ent_lower:
                 matched.append(original)
                 break
 
-    # Deduplicate while preserving order
+    # Keep first match order stable.
     seen: set[str] = set()
     unique: list[str] = []
     for m in matched:
@@ -128,23 +109,12 @@ def match_entities_to_graph(
 
     return unique[:top_k]
 
-
-# ── Graph traversal ───────────────────────────────────────────────
-
 def traverse_graph(
     G: nx.DiGraph,
     seed_nodes: list[str],
     depth: int = GRAPH_TRAVERSAL_DEPTH,
 ) -> dict[str, Any]:
-    """BFS traversal from seed nodes up to *depth* hops.
-
-    Returns:
-      {
-        "nodes": [{"name": ..., "doc_sources": [...], "community": ...}, ...],
-        "edges": [{"source": ..., "target": ..., "predicates": [...], "weight": ...}, ...],
-        "subgraph_text": "formatted text summary of the subgraph",
-      }
-    """
+    """Traverse from seed nodes up to the given depth."""
     visited_nodes: set[str] = set()
     collected_edges: list[dict[str, Any]] = []
     frontier: set[str] = set(seed_nodes)
@@ -155,7 +125,6 @@ def traverse_graph(
             if node not in G:
                 continue
             visited_nodes.add(node)
-            # Outgoing edges
             for _, target, data in G.out_edges(node, data=True):
                 collected_edges.append({
                     "source": node,
@@ -165,7 +134,6 @@ def traverse_graph(
                 })
                 if target not in visited_nodes:
                     next_frontier.add(target)
-            # Incoming edges
             for source, _, data in G.in_edges(node, data=True):
                 collected_edges.append({
                     "source": source,
@@ -177,7 +145,7 @@ def traverse_graph(
                     next_frontier.add(source)
         frontier = next_frontier
 
-    # Deduplicate edges
+    # Avoid printing the same relationship twice.
     edge_set: set[tuple[str, str]] = set()
     unique_edges: list[dict[str, Any]] = []
     for e in collected_edges:
@@ -186,7 +154,6 @@ def traverse_graph(
             edge_set.add(key)
             unique_edges.append(e)
 
-    # Build node info
     node_info = []
     for n in visited_nodes:
         data = G.nodes.get(n, {})
@@ -196,7 +163,6 @@ def traverse_graph(
             "community": data.get("community", -1),
         })
 
-    # Build a text summary of the subgraph
     lines = []
     for e in unique_edges:
         preds = ", ".join(e["predicates"])
@@ -209,30 +175,19 @@ def traverse_graph(
         "subgraph_text": subgraph_text,
     }
 
-
-# ── Context assembly ──────────────────────────────────────────────
-
 def gather_graph_context(
     G: nx.DiGraph,
     seed_nodes: list[str],
     depth: int = GRAPH_TRAVERSAL_DEPTH,
 ) -> tuple[str, list[Document]]:
-    """Gather context from the graph for the given seed entities.
-
-    Returns:
-      - context_text: formatted string with graph relationships + node source texts
-      - context_docs: list of synthetic Documents (for compatibility with evaluation)
-    """
+    """Gather graph text and synthetic docs for matched entities."""
     traversal = traverse_graph(G, seed_nodes, depth=depth)
 
-    # Build rich context text
     parts: list[str] = []
 
-    # 1. Relationship triples
     parts.append("=== Graph Relationships ===")
     parts.append(traversal["subgraph_text"])
 
-    # 2. Source text snippets from visited nodes
     parts.append("\n=== Related Document Excerpts ===")
     seen_texts: set[str] = set()
     for node_info in traversal["nodes"]:
@@ -246,7 +201,7 @@ def gather_graph_context(
 
     context_text = "\n".join(parts)
 
-    # Build synthetic Documents for evaluation framework compatibility
+    # Keep the evaluation code working with graph-only context.
     context_docs: list[Document] = []
     for node_info in traversal["nodes"]:
         node_name = node_info["name"]
@@ -272,24 +227,13 @@ def graph_retrieve(
     depth: int = GRAPH_TRAVERSAL_DEPTH,
     top_k_entities: int = GRAPH_TOP_K_ENTITIES,
 ) -> dict[str, Any]:
-    """Full graph retrieval pipeline: extract entities → match → traverse → assemble.
-
-    Returns dict with keys:
-      - entities: extracted entity names
-      - matched_nodes: nodes found in graph
-      - context_text: assembled context string
-      - context_docs: list of Documents
-      - graph_info: traversal details (nodes, edges)
-    """
-    # Step 1: Extract entities from question
+    """Run entity extraction, matching, traversal, and context assembly."""
     entities = extract_query_entities(question, llm=llm)
     logger.debug("Extracted entities: %s", entities)
 
-    # Step 2: Match to graph nodes
     matched = match_entities_to_graph(entities, G, top_k=top_k_entities)
     logger.debug("Matched graph nodes: %s", matched)
 
-    # Step 3: Traverse and gather context
     if matched:
         context_text, context_docs = gather_graph_context(G, matched, depth=depth)
         traversal = traverse_graph(G, matched, depth=depth)
