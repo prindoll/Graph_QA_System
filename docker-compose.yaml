@@ -1,17 +1,20 @@
-version: '3.8'
+name: graphrag
 
 services:
   neo4j:
-    image: neo4j:latest
-    container_name: neo4j
+    image: neo4j:5.21
+    container_name: graphrag-neo4j
     ports:
-      - "7474:7474"  # Browser
-      - "7687:7687"  # Bolt
+      - "7474:7474"
+      - "7687:7687"
     environment:
-      - NEO4J_AUTH=neo4j/password
+      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
     volumes:
       - neo4j_data:/data
+      - neo4j_logs:/logs
     restart: unless-stopped
+    stop_grace_period: 30s
 
 volumes:
   neo4j_data:
+  neo4j_logs:
