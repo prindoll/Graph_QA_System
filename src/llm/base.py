@@ -16,25 +16,40 @@ class LLMManager:
             from .openai_provider import OpenAIProvider
 
             self.provider = OpenAIProvider()
+        elif provider_type in {"ollama", "local"}:
+            from .ollama_provider import OllamaProvider
+
+            self.provider = OllamaProvider()
         else:
             raise ValueError(f"Unsupported LLM provider: {provider_type}")
 
         logger.info(f"LLM Manager initialized with provider: {provider_type}")
 
     def get_chat_model(self, temperature: Optional[float] = None):
-        if settings.llm_provider.lower() != "openai":
-            raise ValueError(f"Unsupported LangChain chat provider: {settings.llm_provider}")
+        provider_type = settings.llm_provider.lower()
+        if provider_type == "openai":
+            from langchain_openai import ChatOpenAI
 
-        from langchain_openai import ChatOpenAI
+            kwargs = {
+                "model": settings.llm_model,
+                "temperature": settings.llm_temperature if temperature is None else temperature,
+                "max_tokens": settings.llm_max_tokens,
+            }
+            if settings.openai_api_key:
+                kwargs["api_key"] = settings.openai_api_key
+            return ChatOpenAI(**kwargs)
 
-        kwargs = {
-            "model": settings.llm_model,
-            "temperature": settings.llm_temperature if temperature is None else temperature,
-            "max_tokens": settings.llm_max_tokens,
-        }
-        if settings.openai_api_key:
-            kwargs["api_key"] = settings.openai_api_key
-        return ChatOpenAI(**kwargs)
+        if provider_type in {"ollama", "local"}:
+            from langchain_community.chat_models import ChatOllama
+
+            return ChatOllama(
+                model=settings.llm_model,
+                base_url=settings.ollama_base_url,
+                temperature=settings.llm_temperature if temperature is None else temperature,
+                num_predict=settings.llm_max_tokens,
+            )
+
+        raise ValueError(f"Unsupported LangChain chat provider: {settings.llm_provider}")
 
     async def generate_prompt(
         self,

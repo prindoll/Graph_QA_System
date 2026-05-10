@@ -208,6 +208,23 @@ python main.py index data\data.md --clear
 python main.py stats
 ```
 
+Evaluate the Fusarium QA JSONL set with the indexed Neo4j graph:
+
+```powershell
+python evaluate_fusarium.py --input data\qa_eval_fusarium.jsonl --mode auto --top-k 5 --max-hops 2
+```
+
+Compare plain RAG versus GraphRAG using local Ollama LLMs:
+
+```powershell
+ollama serve
+ollama pull gemma2.5
+ollama pull qwen3.5
+python compare_fusarium_rag_graphrag.py --models gemma2.5 qwen3.5 --limit 10
+```
+
+Plain RAG uses `basic` retrieval with graph disabled. GraphRAG uses graph-aware retrieval with graph enabled. If your Ollama tags differ, pass the actual local model names, for example `--models gemma2:9b qwen3:8b`.
+
 ## Notes
 
 - The new schema is not migrated from the previous graph format. Use `--clear` and reindex.

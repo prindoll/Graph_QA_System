@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     llm_extraction_text_chars: int = 3500
     max_llm_community_reports: int = 25
     min_llm_community_size: int = 3
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_keep_alive: str = "5m"
     
     # Embeddings
     embedding_provider: str = "openai"
