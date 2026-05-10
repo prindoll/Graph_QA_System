@@ -1,4 +1,7 @@
 from compare_fusarium_rag_graphrag import _approaches, _comparison_row, _slug
+from config.settings import settings
+from src.llm.base import LLMManager
+from src.llm.ollama_provider import OllamaProvider
 
 
 def test_comparison_approaches_use_plain_rag_and_graph_rag():
@@ -45,3 +48,19 @@ def test_comparison_row_flattens_eval_summary():
 
 def test_model_slug_is_filesystem_friendly():
     assert _slug("qwen 3.5:latest") == "qwen_3.5_latest"
+
+
+def test_llm_manager_accepts_ollama_provider():
+    old_provider = settings.llm_provider
+    old_model = settings.llm_model
+    try:
+        settings.llm_provider = "ollama"
+        settings.llm_model = "gemma2.5"
+
+        manager = LLMManager()
+
+        assert isinstance(manager.provider, OllamaProvider)
+        assert manager.provider.model == "gemma2.5"
+    finally:
+        settings.llm_provider = old_provider
+        settings.llm_model = old_model
