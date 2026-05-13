@@ -13,16 +13,17 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import settings
-from evaluate_fusarium import DEFAULT_INPUT, DEFAULT_OUTPUT_DIR, VALID_RETRIEVAL_MODES, evaluate_fusarium_qa
+from evaluate_fusarium import DEFAULT_INPUT, VALID_RETRIEVAL_MODES, evaluate_fusarium_qa
 
 
 DEFAULT_MODELS = ("gemma2.5", "qwen3.5")
+DEFAULT_COMPARE_OUTPUT_DIR = Path("outputs") / "comparisons"
 
 
 async def compare_fusarium_rag_graphrag(
     models: list[str] | tuple[str, ...] = DEFAULT_MODELS,
     input_path: str | Path = DEFAULT_INPUT,
-    output_dir: str | Path = DEFAULT_OUTPUT_DIR,
+    output_dir: str | Path = DEFAULT_COMPARE_OUTPUT_DIR,
     ollama_base_url: str | None = None,
     limit: int | None = None,
     top_k: int = 5,
@@ -143,7 +144,11 @@ def parse_args() -> argparse.Namespace:
         description="Compare plain RAG and GraphRAG on Fusarium QA using local Ollama models."
     )
     parser.add_argument("--input", default=str(DEFAULT_INPUT), help="Path to Fusarium QA JSONL")
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Output directory")
+    parser.add_argument(
+        "--output-dir",
+        default=str(DEFAULT_COMPARE_OUTPUT_DIR),
+        help="Directory for comparison CSV/JSON outputs",
+    )
     parser.add_argument(
         "--models",
         nargs="+",

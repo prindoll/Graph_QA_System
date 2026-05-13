@@ -223,6 +223,8 @@ ollama pull qwen3.5
 python compare_fusarium_rag_graphrag.py --models gemma2.5 qwen3.5 --limit 10
 ```
 
+Comparison reports are written under `outputs/comparisons/fusarium_compare_local_<timestamp>/` by default.
+
 Plain RAG uses `basic` retrieval with graph disabled. GraphRAG uses graph-aware retrieval with graph enabled. If your Ollama tags differ, pass the actual local model names, for example `--models gemma2:9b qwen3:8b`.
 
 ## Notes

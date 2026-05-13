@@ -34,3 +34,8 @@ uploads/
 
 *.db
 *.sqlite
+
+outputs/*
+!outputs/
+!outputs/comparisons/
+!outputs/comparisons/.gitkeep
